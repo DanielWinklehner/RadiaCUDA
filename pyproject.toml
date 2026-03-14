@@ -1,0 +1,22 @@
+# pyproject.toml
+[build-system]
+requires = ["scikit-build-core>=0.9", "setuptools"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "radia"
+version = "4.200"
+description = "Radia 3D magnetostatics with CUDA support"
+authors = [
+    {name = "O. Chubar, P. Elleaume, J. Chavanne, D. Winklehner, Claude"},
+]
+requires-python = ">=3.12"
+dependencies = ["numpy"]
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+cmake.args = ["-G", "Ninja"]
+wheel.packages = []
+
+[tool.scikit-build.cmake.define]
+CMAKE_BUILD_TYPE = "Release"

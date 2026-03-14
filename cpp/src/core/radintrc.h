@@ -30,11 +30,7 @@
 //-------------------------------------------------------------------------
 //-------------------------------------------------------------------------
 
-#ifdef __GCC__
 typedef list <radTPair_int_hg*> radTlphgPtr;
-#else
-typedef list <radTPair_int_hg*, allocator<radTPair_int_hg*> > radTlphgPtr;
-#endif
 
 //-------------------------------------------------------------------------
 //-------------------------------------------------------------------------
@@ -80,64 +76,11 @@ inline int operator ==(const radTRelaxSubInterval& i1, const radTRelaxSubInterva
 
 //-------------------------------------------------------------------------
 
-#ifdef __GCC__
 typedef vector<radTg3dRelax*> radTVectPtrg3dRelax;
 typedef vector<radTg3d*> radTVectPtr_g3d;
 typedef vector<radTrans*> radTVectPtrTrans;
 typedef vector<radTlphgPtr*> radVectPtr_lphgPtr;
 typedef vector<radTRelaxSubInterval> radTVectRelaxSubInterval;
-#else
-typedef vector<radTg3dRelax*, allocator<radTg3dRelax*> > radTVectPtrg3dRelax;
-typedef vector<radTg3d*, allocator<radTg3d*> > radTVectPtr_g3d;
-typedef vector<radTrans*, allocator<radTrans*> > radTVectPtrTrans;
-typedef vector<radTlphgPtr*, allocator<radTlphgPtr*> > radVectPtr_lphgPtr;
-typedef vector<radTRelaxSubInterval, allocator<radTRelaxSubInterval> > radTVectRelaxSubInterval;
-#endif
-
-#ifdef __MWERKS__
-/*
-null_template
-struct iterator_traits <radTg3dRelax**> {
-     typedef ptrdiff_t difference_type;
-     typedef radTg3dRelax* value_type;
-     typedef radTg3dRelax** pointer;
-     typedef radTg3dRelax*& reference;
-     typedef random_access_iterator_tag iterator_category;
-};
-null_template
-struct iterator_traits <radTg3d**> {
-     typedef ptrdiff_t difference_type;
-     typedef radTg3d* value_type;
-     typedef radTg3d** pointer;
-     typedef radTg3d*& reference;
-     typedef random_access_iterator_tag iterator_category;
-};
-null_template
-struct iterator_traits <radTrans**> {
-     typedef ptrdiff_t difference_type;
-     typedef radTrans* value_type;
-     typedef radTrans** pointer;
-     typedef radTrans*& reference;
-     typedef random_access_iterator_tag iterator_category;
-};
-null_template
-struct iterator_traits <radTlphgPtr**> {
-     typedef ptrdiff_t difference_type;
-     typedef radTlphgPtr* value_type;
-     typedef radTlphgPtr** pointer;
-     typedef radTlphgPtr*& reference;
-     typedef random_access_iterator_tag iterator_category;
-};
-null_template
-struct iterator_traits <radTRelaxSubInterval*> {
-     typedef ptrdiff_t difference_type;
-     typedef radTRelaxSubInterval value_type;
-     typedef radTRelaxSubInterval* pointer;
-     typedef radTRelaxSubInterval& reference;
-     typedef random_access_iterator_tag iterator_category;
-};
-*/
-#endif
 
 //-------------------------------------------------------------------------
 

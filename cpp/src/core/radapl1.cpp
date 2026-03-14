@@ -27,6 +27,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <ctype.h>
 
 #ifdef _WITH_MPI
 #include <mpi.h>

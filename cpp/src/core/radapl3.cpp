@@ -713,21 +713,7 @@ void radTApplication::ComputeFocusKickPer(int ElemKey, double* P1, double* Nlong
 
 		if(SendingIsRequired) 
 		{
-#if defined(__MATHEMATICA__)
-			Send.InitOutList(6);
 
-			int Depth = 2;
-			int Dims[] = { np1, np2 };
-			Send.ArbNestedArrays(pKickData1, Dims, Depth);
-			Send.ArbNestedArrays(pKickData2, Dims, Depth);
-			Send.ArbNestedArrays(pBtE2Int, Dims, Depth); //OC100509
-			Send.DoubleList(pCoordDir1, np1);
-			Send.DoubleList(pCoordDir2, np2);
-
-			char *pStrToSend = pStrReport;
-			if(pStrToSend == 0) pStrToSend = EmptyStr;
-			Send.String(pStrToSend);
-#else
 			//long LenArr = 2*np1*np2 + np1 + np2 + 1;
 			long LenArr = 3*np1*np2 + np1 + np2 + 1;
 			pAuxFlatArr = new double[LenArr]; 
@@ -751,7 +737,6 @@ void radTApplication::ComputeFocusKickPer(int ElemKey, double* P1, double* Nlong
 			Send.DoubleList(pAuxFlatArr, LenArr);
 			
 			if(pAuxFlatArr != 0) { delete[] pAuxFlatArr; pAuxFlatArr = 0;}
-#endif
 		}
 
 		if(pKickData1 != 0) { delete[] pKickData1; pKickData1 = 0;}

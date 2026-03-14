@@ -35,10 +35,8 @@ using namespace std; // Porting
 #ifdef __MWERKS__
 using namespace std; // Porting
 #endif
-#ifdef __GCC__
-//#define std
 using namespace std; // Porting
-#endif
+
 
 //-------------------------------------------------------------------------
 
@@ -91,17 +89,10 @@ struct radTPairIntDouble {
 
 //-------------------------------------------------------------------------
 
-#ifdef __GCC__
 typedef vector <radTInputCell> radTVectInputCell;
 typedef vector <TVector3d> radTVectorOfVector3d;
 typedef vector<radTPairOfDouble> radTVectPairOfDouble;
 typedef vector<radTPairOfVect3d> radTVectPairOfVect3d;
-#else
-typedef vector <radTInputCell, allocator<radTInputCell> > radTVectInputCell;
-typedef vector <TVector3d, allocator<TVector3d> > radTVectorOfVector3d;
-typedef vector<radTPairOfDouble, allocator<radTPairOfDouble> > radTVectPairOfDouble;
-typedef vector<radTPairOfVect3d, allocator<radTPairOfVect3d> > radTVectPairOfVect3d;
-#endif
 
 #ifdef __MWERKS__
 /*
@@ -139,11 +130,7 @@ struct radTGeomPolygon {
 	}
 };
 
-#ifdef __GCC__
 typedef vector <radTGeomPolygon> radTVectGeomPolygon;
-#else
-typedef vector <radTGeomPolygon, allocator<radTGeomPolygon> > radTVectGeomPolygon;
-#endif
 
 //-------------------------------------------------------------------------
 

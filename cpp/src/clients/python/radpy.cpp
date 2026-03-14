@@ -163,7 +163,7 @@ static PyObject* radia_ObjRecMag(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjRecMag(&ind, arP, arL, arM));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -213,7 +213,7 @@ static PyObject* radia_ObjThckPgn(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjThckPgn(&ind, xc, lx, arCrd, nv, a, arM));
 
  		oResInd = Py_BuildValue("i", ind);
- 		Py_XINCREF(oResInd);
+ 		
 	}
 	catch(const char* erText)
 	{
@@ -289,7 +289,7 @@ static PyObject* radia_ObjPolyhdr(PyObject* self, PyObject* args)
 		//to add sRelAbs to the end of RadObjPolyhdr!
 
  		oResInd = Py_BuildValue("i", ind);
- 		Py_XINCREF(oResInd);
+ 		
 	}
 	catch(const char* erText)
 	{
@@ -341,7 +341,7 @@ static PyObject* radia_ObjArcPgnMag(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjArcPgnMag(&ind, arP, a, arCrd, nv, arPhi, nseg, sSymNo[0], arM));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -408,7 +408,7 @@ static PyObject* radia_ObjMltExtPgn(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjMltExtPgn(&ind, arCrd, arSliceLens, arAlt, ns, arM));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -476,7 +476,7 @@ static PyObject* radia_ObjMltExtRtg(PyObject* self, PyObject* args)
 		int ind = 0;
 		g_pyParse.ProcRes(RadObjMltExtRtg(&ind, arCrd, arDims, ns, arM));
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -557,7 +557,7 @@ static PyObject* radia_ObjMltExtTri(PyObject* self, PyObject* args)
 		int ind = 0;
 		g_pyParse.ProcRes(RadObjMltExtTri(&ind, xc, lx, arCrd, arSbd, nv, a, arM, sOpt));
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -595,7 +595,7 @@ static PyObject* radia_ObjCylMag(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjCylMag(&ind, arP, r, h, nseg, a, arM));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -639,7 +639,7 @@ static PyObject* radia_ObjFullMag(PyObject* self, PyObject* args)
 		//g_pyParse.ProcRes(RadObjFullMag(&ind, arP, arL, arM, arK, lenK, indGrp, indMat, arRGB));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -668,7 +668,7 @@ static PyObject* radia_ObjRecCur(PyObject* self, PyObject* args)
 		int ind = 0;
 		g_pyParse.ProcRes(RadObjRecCur(&ind, arP, arL, arJ));
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -709,7 +709,7 @@ static PyObject* radia_ObjArcCur(PyObject* self, PyObject* args)
 		int ind = 0;
 		g_pyParse.ProcRes(RadObjArcCur(&ind, arP, arR, arPhi, h, nseg, sManAuto[0], a, j));
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -752,7 +752,7 @@ static PyObject* radia_ObjRaceTrk(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjRaceTrk(&ind, arP, arR, arL, h, nseg, *sManAuto, a, curDens));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -783,7 +783,7 @@ static PyObject* radia_ObjFlmCur(PyObject* self, PyObject* args)
 		int ind = 0;
 		g_pyParse.ProcRes(RadObjFlmCur(&ind, arCrd, np, I));
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -809,7 +809,7 @@ static PyObject* radia_ObjScaleCur(PyObject* self, PyObject* args)
 
 		g_pyParse.ProcRes(RadObjScaleCur(ind, scaleCoef));
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -836,7 +836,7 @@ static PyObject* radia_ObjBckg(PyObject* self, PyObject* args)
 		int ind = 0;
 		g_pyParse.ProcRes(RadObjBckg(&ind, arB));
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -865,7 +865,7 @@ static PyObject* radia_ObjCnt(PyObject* self, PyObject* args)
 		int ind = 0;
 		g_pyParse.ProcRes(RadObjCnt(&ind, arInds, nInds));
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -895,7 +895,7 @@ static PyObject* radia_ObjAddToCnt(PyObject* self, PyObject* args)
 
 		g_pyParse.ProcRes(RadObjAddToCnt(indCnt, arInds, nInds));
 		oResInd = Py_BuildValue("i", indCnt);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -927,7 +927,7 @@ static PyObject* radia_ObjCntSize(PyObject* self, PyObject* args)
 		//g_pyParse.ProcRes(RadObjCntSize(&sizeCnt, indCnt, sOpt));
 
 		oRes = Py_BuildValue("i", sizeCnt);
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -963,7 +963,7 @@ static PyObject* radia_ObjCntStuf(PyObject* self, PyObject* args)
 			g_pyParse.ProcRes(RadObjCntStuf(arInds, indCnt));
 			oRes = CPyParse::SetDataListOfLists(arInds, sizeCnt, 1, (char*)"i");
 		}
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -993,7 +993,7 @@ static PyObject* radia_ObjDpl(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjDpl(&indDpl, ind, sOpt));
 
 		oResInd = Py_BuildValue("i", indDpl);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1034,7 +1034,6 @@ static PyObject* radia_ObjM(PyObject* self, PyObject* args)
 			oResM = CPyParse::SetDataListsNested(arPM, arMesh, (char*)"d");
 			arPM = arPMorig;
 		}
-		if(oResM) Py_XINCREF(oResM);
 	}
 	catch(const char* erText)
 	{
@@ -1078,7 +1077,7 @@ static PyObject* radia_ObjCenFld(PyObject* self, PyObject* args)
 			oRes = CPyParse::SetDataListsNested(arPB, arMesh, (char*)"d");
 			arPB = arPBorig;
 		}
-		if(oRes) Py_XINCREF(oRes);
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1107,7 +1106,7 @@ static PyObject* radia_ObjSetM(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjSetM(ind, arM));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1142,7 +1141,7 @@ static PyObject* radia_ObjCutMag(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjCutMag(arInds, &nObj, ind, arP, arN, sOpt));
 
 		oRes = CPyParse::SetDataListOfLists(arInds, nObj, 1, (char*)"i");
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1198,7 +1197,7 @@ static PyObject* radia_ObjDivMagPln(PyObject* self, PyObject* args)
 		//g_pyParse.ProcRes(RadObjDivMagPln(&indNew, ind, arSbdPar, nSbdPar, arN1N2N3, sOpt));
 
 		oResInd = Py_BuildValue("i", indNew);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1250,7 +1249,7 @@ static PyObject* radia_ObjDivMagCyl(PyObject* self, PyObject* args)
 		//g_pyParse.ProcRes(RadObjDivMagCyl(&indNew, ind, arSbdPar, nSbdPar, arAVP, rat, sOpt));
 
 		oResInd = Py_BuildValue("i", indNew);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1329,7 +1328,7 @@ static PyObject* radia_ObjDivMag(PyObject* self, PyObject* args)
 		else throw CombErStr(strEr_BadFuncArg, ": ObjDivMag, incorrect definition of subdivision (segmentation) type");
 
 		oResInd = Py_BuildValue("i", indNew);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1355,7 +1354,7 @@ static PyObject* radia_ObjGeoVol(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjGeoVol(&v, ind));
 
 		oRes = Py_BuildValue("d", v);
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1381,7 +1380,7 @@ static PyObject* radia_ObjGeoLim(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjGeoLim(arLim, ind));
 
 		oRes = CPyParse::SetDataListOfLists(arLim, 6, 1, (char*)"d");
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1407,7 +1406,7 @@ static PyObject* radia_ObjDegFre(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadObjDegFre(&numDegFre, ind));
 
 		oRes = Py_BuildValue("i", numDegFre);
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1565,10 +1564,10 @@ static PyObject* radia_ObjDrwVTK(PyObject* self, PyObject* args) //OC03112019 (r
 			ParseGeomDataDrwVTK(arCrdVL, nVertLines, arLenL, arColL, nLines)
 		);
 		if(oRes == NULL) throw strEr_MAF;
-		//TODO(robnagler) ref counts are invalid at this point,
+		// TODO (robnagler) ref counts are invalid at this point,
 		//  but then this is a malloc error...
 
-		Py_XINCREF(oRes); //? NOTE: seem to have experienced crashes without this
+		 // NOTE: seem to have experienced crashes without this
 	}
 	catch(const char* erText)
 	{
@@ -1606,7 +1605,7 @@ static PyObject* radia_TrfPlSym(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadTrfPlSym(&ind, arP, arN));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1638,7 +1637,7 @@ static PyObject* radia_TrfRot(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadTrfRot(&ind, arP, arV, phi));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1666,7 +1665,7 @@ static PyObject* radia_TrfTrsl(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadTrfTrsl(&ind, arV));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1688,7 +1687,7 @@ static PyObject* radia_TrfInv(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadTrfInv(&ind));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1714,7 +1713,7 @@ static PyObject* radia_TrfCmbL(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadTrfCmbL(&ind, indTrfOrig, indTrf));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1740,7 +1739,7 @@ static PyObject* radia_TrfCmbR(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadTrfCmbR(&ind, indTrfOrig, indTrf));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1768,7 +1767,7 @@ static PyObject* radia_TrfMlt(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadTrfMlt(&ind, indObj, indTrf, mlt));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1794,7 +1793,7 @@ static PyObject* radia_TrfOrnt(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadTrfOrnt(&ind, indObj, indTrf));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText) 
 	{
@@ -1826,7 +1825,7 @@ static PyObject* radia_TrfZerPara(PyObject* self, PyObject* args)
 		int indRes = 0;
 		g_pyParse.ProcRes(RadTrfZerPara(&indRes, ind, arP, arN));
 		oResInd = Py_BuildValue("i", indRes);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -1859,7 +1858,7 @@ static PyObject* radia_TrfZerPerp(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadTrfZerPerp(&indRes, ind, arP, arN));
 
 		oResInd = Py_BuildValue("i", indRes);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -1885,7 +1884,7 @@ static PyObject* radia_MatApl(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadMatApl(&indRes, indObj, indMat));
 
 		oResInd = Py_BuildValue("i", indRes);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -1916,7 +1915,7 @@ static PyObject* radia_MatStd(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadMatStd(&indRes, sMatId, absM));
 
 		oResInd = Py_BuildValue("i", indRes);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -1957,7 +1956,7 @@ static PyObject* radia_MatLin(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadMatLin(&indRes, arKsi, arMr, nMr));
 
 		oResInd = Py_BuildValue("i", indRes);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch (const char* erText)
 	{
@@ -1995,7 +1994,7 @@ static PyObject* radia_MatSatIsoFrm(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadMatSatIsoFrm(&indRes, arKsiMs1, arKsiMs2, arKsiMs3));
 
 		oResInd = Py_BuildValue("i", indRes);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2029,7 +2028,7 @@ static PyObject* radia_MatSatIsoTab(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadMatSatIsoTab(&indRes, arMatData, nDataP));
 
 		oResInd = Py_BuildValue("i", indRes);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch (const char* erText)
 	{
@@ -2066,7 +2065,7 @@ static PyObject* radia_MatSatLamFrm(PyObject* self, PyObject* args)
 		}
 		if(o3 != 0)
 		{
-			if(PyNumber_Check(o2)) p = PyFloat_AsDouble(o3);
+			if(PyNumber_Check(o3)) p = PyFloat_AsDouble(o3);
 			else
 			{
 				if(p == 0)
@@ -2083,7 +2082,7 @@ static PyObject* radia_MatSatLamFrm(PyObject* self, PyObject* args)
 		{
 			if(p == 0)
 			{
-				if(PyNumber_Check(o2)) p = PyFloat_AsDouble(o4);
+				if(PyNumber_Check(o4)) p = PyFloat_AsDouble(o4);
 			}
 			else
 			{
@@ -2101,7 +2100,7 @@ static PyObject* radia_MatSatLamFrm(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadMatSatLamFrm(&indRes, arKsiMs1, arKsiMs2, arKsiMs3, p, arN));
 
 		oResInd = Py_BuildValue("i", indRes);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch (const char* erText)
 	{
@@ -2125,7 +2124,7 @@ static PyObject* radia_MatSatLamTab(PyObject* self, PyObject* args)
 	try
 	{
 		double p=0;
-		if(!PyArg_ParseTuple(args, "Od|O:MatSatLamTab", &oMatData, &p, oN)) throw CombErStr(strEr_BadFuncArg, ": MatSatLamTab");
+		if(!PyArg_ParseTuple(args, "Od|O:MatSatLamTab", &oMatData, &p, &oN)) throw CombErStr(strEr_BadFuncArg, ": MatSatLamTab");
 		if((oMatData == 0) || (p == 0)) throw CombErStr(strEr_BadFuncArg, ": MatSatLamTab");
 
 		int nDataTot=0;
@@ -2143,7 +2142,7 @@ static PyObject* radia_MatSatLamTab(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadMatSatLamTab(&indRes, arMatData, nDataP, p, arN));
 
 		oResInd = Py_BuildValue("i", indRes);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2195,7 +2194,7 @@ static PyObject* radia_MatSatAniso(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadMatSatAniso(&indRes, arPar, nPar, arPer, nPer));
 
 		oResInd = Py_BuildValue("i", indRes);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2229,7 +2228,6 @@ static PyObject* radia_MatMvsH(PyObject* self, PyObject* args)
 
 		if(lenM == 1) oResM = Py_BuildValue("d", *arM);
 		else if(lenM > 1) oResM = CPyParse::SetDataListOfLists(arM, lenM, 1);
-		if(oResM) Py_XINCREF(oResM);
 	}
 	catch(const char* erText)
 	{
@@ -2256,7 +2254,7 @@ static PyObject* radia_RlxPre(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadRlxPre(&ind, indObj, indSrc));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2285,7 +2283,7 @@ static PyObject* radia_RlxMan(PyObject* self, PyObject* args)
 
 		if(lenRes == 1) oResInd = Py_BuildValue("d", *arRes);
 		else if(lenRes > 1) oResInd = CPyParse::SetDataListOfLists(arRes, lenRes, 1);
-		if(oResInd) Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -2319,7 +2317,7 @@ static PyObject* radia_RlxAuto(PyObject* self, PyObject* args)
 
 		if(lenRes == 1) oResInd = Py_BuildValue("d", *arRes);
 		else if(lenRes > 1) oResInd = CPyParse::SetDataListOfLists(arRes, lenRes, 1);
-		if(oResInd) Py_XINCREF(oResInd);
+		
 	}
 	catch(const char* erText)
 	{
@@ -2345,7 +2343,7 @@ static PyObject* radia_RlxUpdSrc(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadRlxUpdSrc(ind));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2376,7 +2374,7 @@ static PyObject* radia_Solve(PyObject* self, PyObject* args)
 
 		if(lenResSolve == 1) oRes = Py_BuildValue("d", *arResSolve);
 		else if(lenResSolve > 1) oRes = CPyParse::SetDataListOfLists(arResSolve, lenResSolve, 1);
-		if(oRes) Py_XINCREF(oRes);
+		
 	}
 	catch(const char* erText)
 	{
@@ -2418,7 +2416,6 @@ static PyObject* radia_Fld(PyObject* self, PyObject* args)
 
 		if(nB == 1) oResB = Py_BuildValue("d", *arB);
 		else if(nB > 1) oResB = CPyParse::SetDataListOfLists(arB, nB, nP);
-		if(oResB) Py_XINCREF(oResB);
 	}
 	catch(const char* erText) 
 	{
@@ -2463,7 +2460,6 @@ static PyObject* radia_FldLst(PyObject* self, PyObject* args)
 
 		if(nB == 1) oResB = Py_BuildValue("d", *arB);
 		else if(nB > 1) oResB = CPyParse::SetDataListOfLists(arB, nB, nP);
-		if(oResB) Py_XINCREF(oResB);
 	}
 	catch(const char* erText) 
 	{
@@ -2501,7 +2497,6 @@ static PyObject* radia_FldInt(PyObject* self, PyObject* args)
 
 		if(nIB == 1) oResIB = Py_BuildValue("d", *arIB);
 		else if(nIB > 1) oResIB = CPyParse::SetDataListOfLists(arIB, nIB, 1);
-		if(oResIB) Py_XINCREF(oResIB);
 	}
 	catch(const char* erText)
 	{
@@ -2539,8 +2534,6 @@ static PyObject* radia_FldPtcTrj(PyObject* self, PyObject* args)
 
 		if(nTrjPts == 1) oResTrj = Py_BuildValue("d", *arTrj);
 		else if (nTrjPts > 1) oResTrj = CPyParse::SetDataListOfLists(arTrj, nTrjPts, Np);
-		if(oResTrj) Py_XINCREF(oResTrj);
-
 		//if (arTrj != 0) delete[] arTrj; //OC (commented-out)
 	}
 	catch (const char* erText)
@@ -2570,7 +2563,6 @@ static PyObject* radia_FldEnr(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadFldEnr(&resE, indDst, indSrc, arSbdPar));
 
 		oResE = Py_BuildValue("d", resE);
-		Py_XINCREF(oResE); //?
 	}
 	catch (const char* erText)
 	{
@@ -2603,7 +2595,6 @@ static PyObject* radia_FldEnrFrc(PyObject* self, PyObject* args)
 
 		if(nF == 1) oResF = Py_BuildValue("d", *arF);
 		else if(nF > 1) oResF = CPyParse::SetDataListOfLists(arF, nF, 1);
-		if(oResF) Py_XINCREF(oResF);
 	}
 	catch(const char* erText)
 	{
@@ -2640,7 +2631,6 @@ static PyObject* radia_FldEnrTrq(PyObject* self, PyObject* args)
 
 		if(nT == 1) oResT = Py_BuildValue("d", *arT);
 		else if(nT > 1) oResT = CPyParse::SetDataListOfLists(arT, nT, 1);
-		if(oResT) Py_XINCREF(oResT);
 	}
 	catch(const char* erText)
 	{
@@ -2667,7 +2657,6 @@ static PyObject* radia_FldFrc(PyObject* self, PyObject* args)
 
 		if(nF == 1) oResF = Py_BuildValue("d", *arF);
 		else if(nF > 1) oResF = CPyParse::SetDataListOfLists(arF, nF, 1);
-		if(oResF) Py_XINCREF(oResF);
 	}
 	catch(const char* erText)
 	{
@@ -2697,7 +2686,7 @@ static PyObject* radia_FldFrcShpRtg(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadFldFrcShpRtg(&ind, arP, arW));
 
 		oResInd = Py_BuildValue("i", ind);
-		Py_XINCREF(oResInd); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2716,7 +2705,7 @@ static PyObject* radia_FldFocPot(PyObject* self, PyObject* args)
 	try
 	{
 		int indObj=0, np=0;
-		if(!PyArg_ParseTuple(args, "iOOi:FldFocPot", &indObj, &oP1, &oP2)) throw CombErStr(strEr_BadFuncArg, ": FldFocPot");
+		if(!PyArg_ParseTuple(args, "iOOi:FldFocPot", &indObj, &oP1, &oP2, &np))
 		if((indObj <= 0) || (np <= 0)) throw CombErStr(strEr_BadFuncArg, ": FldFocPot");
 
 		double arP1[3], arP2[3];
@@ -2727,7 +2716,6 @@ static PyObject* radia_FldFocPot(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadFldFocPot(&resFP, indObj, arP1, arP2, np));
 
 		oResFP = Py_BuildValue("d", resFP);
-		Py_XINCREF(oResFP); //?
 	}
 	catch(const char* erText)
 	{
@@ -2811,7 +2799,7 @@ static PyObject* radia_FldFocKickPer(PyObject* self, PyObject* args)
 		PyObject *oOutStr = Py_BuildValue("s", sOut); //to check
 		PyTuple_SET_ITEM(oRes, 5, oOutStr);
 
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2843,7 +2831,7 @@ static PyObject* radia_FldCmpCrt(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadFldCmpCrt(&dummy, prcB, prcA, prcBInt, prcFrc, prcTrjCrd, prcTrjAng));
 
 		oRes = Py_BuildValue("i", dummy);
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2870,7 +2858,7 @@ static PyObject* radia_FldCmpPrc(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadFldCmpPrc(&dummy, sOpt));
 
 		oRes = Py_BuildValue("i", dummy);
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2891,7 +2879,6 @@ static PyObject* radia_FldUnits(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadFldUnits(sUnits));
 
 		oResUnits = Py_BuildValue("s", sUnits); //to check
-		Py_XINCREF(oResUnits); //?
 	}
 	catch(const char* erText)
 	{
@@ -2918,7 +2905,7 @@ static PyObject* radia_FldLenRndSw(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadFldLenRndSw(&res, sOnOff));
 
 		oRes = Py_BuildValue("i", res);
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2944,7 +2931,7 @@ static PyObject* radia_FldLenTol(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadFldLenTol(&dummy, AbsVal, RelVal, ZeroVal));
 
 		oRes = Py_BuildValue("i", dummy);
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -2985,7 +2972,6 @@ static PyObject* radia_FldShimSig(PyObject* self, PyObject* args)
 
 		if(nTot == 1) oResShimSig = Py_BuildValue("d", *arB);
 		else if(nTot > 1) oResShimSig = CPyParse::SetDataListOfLists(arB, nTot, np);
-		if(oResShimSig) Py_XINCREF(oResShimSig);
 	}
 	catch(const char* erText)
 	{
@@ -3050,7 +3036,7 @@ static PyObject* radia_UtiDmp(PyObject* self, PyObject* args)
 				oRes = CPyParse::Py_BuildValueByteStr(sDmp, nBytes);
 			}
 
-			if(oRes) Py_XINCREF(oRes);
+			
 		}
 	}
 	catch(const char* erText)
@@ -3107,8 +3093,6 @@ static PyObject* radia_UtiDmpPrs(PyObject* self, PyObject* args)
 
 			oRes = Py_BuildValue("i", auxInd);
 		}
-
-		if(oRes!= 0) Py_XINCREF(oRes); //?
 	}
 	catch(const char* erText)
 	{
@@ -3133,7 +3117,7 @@ static PyObject* radia_UtiDel(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadUtiDel(&nDummy, ind));
 
 		oRes = Py_BuildValue("i", nDummy);
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -3155,7 +3139,7 @@ static PyObject* radia_UtiDelAll(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadUtiDelAll(&nDummy));
 
 		oRes = Py_BuildValue("i", nDummy);
-		Py_XINCREF(oRes); //?
+		
 	}
 	catch(const char* erText)
 	{
@@ -3177,7 +3161,6 @@ static PyObject* radia_UtiVer(PyObject* self, PyObject* args)
 		g_pyParse.ProcRes(RadUtiVer(&verNum));
 
 		oVerNum = Py_BuildValue("d", verNum);
-		if(oVerNum) Py_XINCREF(oVerNum);
 	}
 	catch (const char* erText)
 	{
@@ -3236,7 +3219,6 @@ static PyObject* radia_UtiMPI(PyObject* self, PyObject* args)
 		//oParMPI = Py_BuildValue("i", arParMPI[0]); //returning just rank to simplify its use in scripts
 		//oParMPI = CPyParse::SetDataTuple(arParMPI, 2, (char*)"i");
 		//oParMPI = CPyParse::SetDataListOfLists(arParMPI, 2, 1, (char*)"i");
-		if(oParMPI) Py_XINCREF(oParMPI);
 	}
 	catch(const char* erText)
 	{

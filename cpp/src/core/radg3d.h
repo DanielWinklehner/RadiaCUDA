@@ -35,11 +35,7 @@
 //-------------------------------------------------------------------------
 //-------------------------------------------------------------------------
 
-#ifdef __GCC__
 typedef list <radTPair_int_hg> radTlphg;
-#else
-typedef list <radTPair_int_hg, allocator<radTPair_int_hg> > radTlphg; // Porting
-#endif
 
 //-------------------------------------------------------------------------
 
@@ -280,7 +276,7 @@ public:
 	virtual void LimitsAtTransform(radTrans*, double*);
 
 	virtual void Push_backCenterPointAndField(radTFieldKey*, radTVectPairOfVect3d*, radTrans*, radTg3d*, radTApplication*) {}
-	inline void GetTrfAndCenPointInLabFrame(radTrans* pBaseTrans, radTrans& bufTrans, radTrans*& pResTrans, TVector3d& cenPointInLabFr);
+	void GetTrfAndCenPointInLabFrame(radTrans* pBaseTrans, radTrans& bufTrans, radTrans*& pResTrans, TVector3d& cenPointInLabFr);
 
 	inline double TransAtans(double, double, double&);
 	inline double Argument(double x, double y); 
@@ -1007,38 +1003,6 @@ inline char radTg3d::AngleIsBetween(double Phi, double PhiSt, double PhiFi)
 	}
 }
 
-//-------------------------------------------------------------------------
-
-#include "radtrans.h" //to allow making subsequent inline
-
-//-------------------------------------------------------------------------
-
-inline void radTg3d::GetTrfAndCenPointInLabFrame(radTrans* pInBaseTrans, radTrans& bufTrans, radTrans*& pOutResTrans, TVector3d& outCenPointInLabFr)
-{//assumes that pInBaseTrans and pResTrans were allocated by calling function(s)
- //in any case, it doesn't (re-)allocate pOutResTrans
-	pOutResTrans = 0;
-	radTrans* pTrans = (g3dListOfTransform.empty())? 0 : (radTrans*)((*(g3dListOfTransform.begin())).Handler_g.rep);
-	if(pTrans != 0)
-	{
-		if(pInBaseTrans != 0) 
-		{
-			TrProduct(pInBaseTrans, pTrans, bufTrans);
-			pOutResTrans = &bufTrans;
-		}
-		else //OC04082010
-		{
-			pOutResTrans = pTrans; //?
-		}
-	}
-	else
-	{
-		if(pInBaseTrans != 0) pOutResTrans = pInBaseTrans;
-	}
-	outCenPointInLabFr = CentrPoint;
-	if(pOutResTrans != 0) outCenPointInLabFr = pOutResTrans->TrPoint(outCenPointInLabFr);
-}
-
-//-------------------------------------------------------------------------
 
 inline void radTAuxCompDataG3D::StoreDataFromField(radTField* FieldPtr)
 {

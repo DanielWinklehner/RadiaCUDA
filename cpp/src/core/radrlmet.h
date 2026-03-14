@@ -505,17 +505,8 @@ inline bool radTAuxIndNorm::greater(const radTAuxIndNorm& P1, const radTAuxIndNo
 //}
 
 //-------------------------------------------------------------------------
-
-#ifdef __GCC__
 typedef list <radTAuxIndNorm> radTlAuxIndNorm;
 typedef vector <int> radTvInt;
-//typedef vector <radTvInt> radTvvInt;
-#else
-typedef list <radTAuxIndNorm, allocator<radTAuxIndNorm> > radTlAuxIndNorm;
-typedef vector <int, allocator<int> > radTvInt;
-//typedef vector <radTvInt, allocator<radTvInt> > radTvvInt;
-#endif
-
 //-------------------------------------------------------------------------
 
 class radTRelaxationMethNo_7 : public radTIterativeRelaxMeth {

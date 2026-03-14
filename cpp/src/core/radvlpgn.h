@@ -57,48 +57,10 @@ inline int operator ==(const radTHandlePgnAndTrans& h1, const radTHandlePgnAndTr
 }
 
 //-------------------------------------------------------------------------
-
-#ifdef __GCC__
 typedef vector<radTHandlePgnAndTrans> radTVectHandlePgnAndTrans;
 typedef vector<TVector3d*> radTVectOfPtrToVect3d;
 typedef list<TVector3d> radTListOfVector3d;
 typedef vector<TVector3d> radTVectVect3d;
-#else
-typedef vector<radTHandlePgnAndTrans, allocator<radTHandlePgnAndTrans> > radTVectHandlePgnAndTrans;
-typedef vector<TVector3d*, allocator<TVector3d*> > radTVectOfPtrToVect3d;
-typedef list<TVector3d, allocator<TVector3d> > radTListOfVector3d;
-typedef vector<TVector3d, allocator<TVector3d> > radTVectVect3d;
-#endif
-
-#ifdef __MWERKS__
-/*
-null_template
-struct iterator_traits <TVector3d*> {
-     typedef ptrdiff_t difference_type;
-     typedef TVector3d value_type;
-     typedef TVector3d* pointer;
-     typedef TVector3d& reference;
-     typedef random_access_iterator_tag iterator_category;
-};
-null_template
-struct iterator_traits <radTHandlePgnAndTrans*> {
-     typedef ptrdiff_t difference_type;
-     typedef radTHandlePgnAndTrans value_type;
-     typedef radTHandlePgnAndTrans* pointer;
-     typedef radTHandlePgnAndTrans& reference;
-     typedef random_access_iterator_tag iterator_category;
-};
-null_template
-struct iterator_traits <TVector3d**> {
-     typedef ptrdiff_t difference_type;
-     typedef TVector3d* value_type;
-     typedef TVector3d** pointer;
-     typedef TVector3d*& reference;
-     typedef random_access_iterator_tag iterator_category;
-};
-*/
-#endif
-
 //-------------------------------------------------------------------------
 
 class radTPolyhedron : public radTg3dRelax {

@@ -303,11 +303,7 @@ void radTInteraction::FillInRelaxSubIntervArray() // New
 	int CurrentStartNo = 0;
 	int PlainCount = -1;
 
-#ifdef __GCC__
 	vector<radTRelaxSubInterval>::iterator Iter;
-#else
-	vector<radTRelaxSubInterval, allocator<radTRelaxSubInterval> >::iterator Iter;
-#endif
 
 	for(Iter = RelaxSubIntervConstrVect.begin(); Iter != RelaxSubIntervConstrVect.end(); ++Iter)
 	{

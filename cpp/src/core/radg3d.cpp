@@ -18,7 +18,7 @@
 #include "radappl.h"
 #include "radg3d.h"
 #include "radg3da1.h"
-//#include "radtrans.h"
+#include "radtrans.h"
 #include "gmtrans.h"
 #include "radcast.h"
 
@@ -29,6 +29,30 @@ extern radTApplication rad;
 
 //-------------------------------------------------------------------------
 //-------------------------------------------------------------------------
+
+void radTg3d::GetTrfAndCenPointInLabFrame(radTrans* pInBaseTrans, radTrans& bufTrans, radTrans*& pOutResTrans, TVector3d& outCenPointInLabFr)
+{
+	pOutResTrans = 0;
+	radTrans* pTrans = (g3dListOfTransform.empty())? 0 : (radTrans*)((*(g3dListOfTransform.begin())).Handler_g.rep);
+	if(pTrans != 0)
+	{
+		if(pInBaseTrans != 0)
+		{
+			TrProduct(pInBaseTrans, pTrans, bufTrans);
+			pOutResTrans = &bufTrans;
+		}
+		else
+		{
+			pOutResTrans = pTrans;
+		}
+	}
+	else
+	{
+		if(pInBaseTrans != 0) pOutResTrans = pInBaseTrans;
+	}
+	outCenPointInLabFr = CentrPoint;
+	if(pOutResTrans != 0) outCenPointInLabFr = pOutResTrans->TrPoint(outCenPointInLabFr);
+}
 
 void radTg3d::NestedFor_B(radTField* FieldPtr, const radTlphg::iterator& Iter)
 {

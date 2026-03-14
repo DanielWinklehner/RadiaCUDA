@@ -60,20 +60,8 @@ struct radGraphPresOptions {
 
 //-------------------------------------------------------------------------
 
-#ifdef __GCC__
 typedef	map <int, radTDrawAttr, less<int> >  radTMapOfDrawAttr;
-
-//#ifdef _WITH_QD3D
 typedef	vector<radTDrawAttr> radTVectOfDrawAttr;
-//#endif
-
-#else
-typedef	map <int, radTDrawAttr, less<int> >  radTMapOfDrawAttr;
-
-//#ifdef _WITH_QD3D
-typedef	vector<radTDrawAttr, allocator<radTDrawAttr> > radTVectOfDrawAttr;
-//#endif
-#endif
 
 #ifdef __MWERKS__
 #ifdef _WITH_QD3D

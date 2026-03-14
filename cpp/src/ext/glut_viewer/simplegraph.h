@@ -100,15 +100,9 @@ public:
 //-------------------------------------------------------------------------
 
 typedef CHandle<CWinCont> CHWinCont;
-
 typedef map <int, CHWinCont, less<int> > CHWinContMap;
-#ifdef __GCC__
 typedef list <CHWinCont> CHWinContList;
 typedef vector <CHWinCont > CHWinContVect;
-#else
-typedef list <CHWinCont, allocator<CHWinCont> > CHWinContList;
-typedef vector <CHWinCont, allocator<CHWinCont> > CHWinContVect;
-#endif
 
 //-------------------------------------------------------------------------
 // Auxiliary structures

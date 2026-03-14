@@ -1,0 +1,21 @@
+# environment-linux.yml
+name: radiacuda
+channels:
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - numpy
+  - matplotlib
+  - scipy
+  - fftw
+  - cmake>=3.28
+  - ninja
+  - setuptools
+  - scikit-build-core
+  - intel-openmp
+  - cupy
+  - cuda-toolkit=12.6
+  - openmpi
+  - pip

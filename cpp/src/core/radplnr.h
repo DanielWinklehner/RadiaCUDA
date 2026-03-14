@@ -210,30 +210,9 @@ public:
 };
 
 //-------------------------------------------------------------------------
-
-#ifdef __GCC__
 typedef vector<radTPolyg2dIntrsctInfo> radTPolyg2dIntrsctInfoVect;
 typedef vector<TVector2d> radTVect2dVect;
 typedef vector<int> radTVectInt;
-#else
-typedef vector<radTPolyg2dIntrsctInfo, allocator<radTPolyg2dIntrsctInfo> > radTPolyg2dIntrsctInfoVect;
-typedef vector<TVector2d, allocator<TVector2d> > radTVect2dVect;
-typedef vector<int, allocator<int> > radTVectInt;
-#endif
-
-#ifdef __MWERKS__
-/*
-null_template
-struct iterator_traits <TVector2d*> {
-     typedef ptrdiff_t difference_type;
-     typedef TVector2d value_type;
-     typedef TVector2d* pointer;
-     typedef TVector2d& reference;
-     typedef random_access_iterator_tag iterator_category;
-};
-*/
-#endif
-
 //-------------------------------------------------------------------------
 
 enum TSpecCaseID { ZeroVxVy, ZeroVxVz, ZeroVyVz, NoSpecCase };

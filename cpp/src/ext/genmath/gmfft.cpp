@@ -15,6 +15,29 @@
 
 //*************************************************************************
 
+static fftwf_plan CrPlan1D(int n, int direction)
+{
+    fftwf_complex *tmp_in = (fftwf_complex *)fftwf_malloc(
+        sizeof(fftwf_complex) * n);
+    fftwf_complex *tmp_out = (fftwf_complex *)fftwf_malloc(
+        sizeof(fftwf_complex) * n);
+    fftwf_plan p = fftwf_plan_dft_1d(
+        n, tmp_in, tmp_out, direction, FFTW_ESTIMATE);
+    fftwf_free(tmp_in);
+    fftwf_free(tmp_out);
+    return p;
+}
+
+static fftwf_plan CrPlan2D(int ny, int nx, int direction)
+{
+    fftwf_complex *tmp = (fftwf_complex *)fftwf_malloc(
+        sizeof(fftwf_complex) * nx * ny);
+    fftwf_plan p = fftwf_plan_dft_2d(
+        ny, nx, tmp, tmp, direction, FFTW_ESTIMATE);
+    fftwf_free(tmp);
+    return p;
+}
+
 long CGenMathFFT::GoodNumbers[] = {
 	2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 36, 40, 42, 44, 
 	48, 50, 52, 54, 56, 60, 64, 66, 70, 72, 78, 80, 84, 88, 90, 96, 98, 100, 104, 
@@ -196,17 +219,15 @@ int CGenMathFFT1D::Make1DFFT_InPlace(CGenMathFFT1DInfo& FFT1DInfo)
 //*************************************************************************
 
 int CGenMathFFT2D::AuxDebug_TestFFT_Plans()
-{//debug function to test why fftw2d_create_plan crashed at Nx=Nz=104
-
-	for(long i=3; i<(CGenMathFFT::LenGoodNumbers); i++)
-	{
-		int CurN = GoodNumbers[i];
-		fftwnd_plan Plan2DFFT;
-        //fftwnd_destroy_plan(Plan2DFFT);
-		Plan2DFFT = fftw2d_create_plan(CurN, CurN, FFTW_FORWARD, FFTW_IN_PLACE);
-        fftwnd_destroy_plan(Plan2DFFT);
-	}
-	return 0;
+{
+    for(long i=3; i<(CGenMathFFT::LenGoodNumbers); i++)
+    {
+        int CurN = GoodNumbers[i];
+        fftwf_plan Plan2DFFT;
+        Plan2DFFT = CrPlan2D(CurN, CurN, FFTW_FORWARD);
+        fftwf_destroy_plan(Plan2DFFT);
+    }
+    return 0;
 }
 
 //*************************************************************************
@@ -257,8 +278,8 @@ int CGenMathFFT2D::Make2DFFT(CGenMathFFT2DInfo& FFT2DInfo)
 		if(ArrayShiftY == 0) return MEMORY_ALLOCATION_FAILURE;
 	}
 
-	fftwnd_plan Plan2DFFT;
-	FFTW_COMPLEX *DataToFFT = (FFTW_COMPLEX*)(FFT2DInfo.pData);
+	fftwf_plan Plan2DFFT;
+	CmplxF *DataToFFT = (CmplxF*)(FFT2DInfo.pData);
 
 	char t0SignMult = (FFT2DInfo.Dir > 0)? -1 : 1;
 
@@ -268,19 +289,20 @@ int CGenMathFFT2D::Make2DFFT(CGenMathFFT2DInfo& FFT2DInfo)
 
 	if(FFT2DInfo.Dir > 0)
 	{
-		Plan2DFFT = fftw2d_create_plan(Ny, Nx, FFTW_FORWARD, FFTW_IN_PLACE);
-		if(Plan2DFFT == 0) return ERROR_IN_FFT;
-		fftwnd(Plan2DFFT, 1, DataToFFT, 1, 0, DataToFFT, 1, 0);
+        Plan2DFFT = CrPlan2D(Ny, Nx, FFTW_FORWARD);
+        if(Plan2DFFT == 0) return ERROR_IN_FFT;
+        fftwf_execute_dft(Plan2DFFT, (fftwf_complex*)DataToFFT, (fftwf_complex*)DataToFFT);
+
 		RepairSignAfter2DFFT(DataToFFT);
 		RotateDataAfter2DFFT(DataToFFT);
 	}
 	else
 	{
-		Plan2DFFT = fftw2d_create_plan(Ny, Nx, FFTW_BACKWARD, FFTW_IN_PLACE);
-		if(Plan2DFFT == 0) return ERROR_IN_FFT;
+		Plan2DFFT = CrPlan2D(Ny, Nx, FFTW_BACKWARD);
+        if(Plan2DFFT == 0) return ERROR_IN_FFT;
 		RotateDataAfter2DFFT(DataToFFT);
 		RepairSignAfter2DFFT(DataToFFT);
-		fftwnd(Plan2DFFT, 1, DataToFFT, 1, 0, DataToFFT, 1, 0);
+		fftwf_execute_dft(Plan2DFFT, (fftwf_complex*)DataToFFT, (fftwf_complex*)DataToFFT);
 	}
 	double Mult = FFT2DInfo.xStep*FFT2DInfo.yStep;
 	NormalizeDataAfter2DFFT(DataToFFT, Mult);
@@ -289,7 +311,7 @@ int CGenMathFFT2D::Make2DFFT(CGenMathFFT2DInfo& FFT2DInfo)
 	if(NeedsShiftAfterY) FillArrayShift('y', t0SignMult*y0_After, FFT2DInfo.yStepTr);
 	if(NeedsShiftAfterX || NeedsShiftAfterY) TreatShifts(DataToFFT);
 
-	fftwnd_destroy_plan(Plan2DFFT);
+	fftwf_destroy_plan(Plan2DFFT);
 
 	if(ArrayShiftX != 0) 
 	{
@@ -333,9 +355,9 @@ int CGenMathFFT1D::Make1DFFT(CGenMathFFT1DInfo& FFT1DInfo)
 		if(m_ArrayShiftX == 0) return MEMORY_ALLOCATION_FAILURE;
 	}
 
-	fftw_plan Plan1DFFT;
-	FFTW_COMPLEX *DataToFFT = (FFTW_COMPLEX*)(FFT1DInfo.pInData);
-	FFTW_COMPLEX *OutDataFFT = (FFTW_COMPLEX*)(FFT1DInfo.pOutData);
+	fftwf_plan Plan1DFFT;
+	CmplxF *DataToFFT = (CmplxF*)(FFT1DInfo.pInData);
+    CmplxF *OutDataFFT = (CmplxF*)(FFT1DInfo.pOutData);
 
 	char t0SignMult = (FFT1DInfo.Dir > 0)? -1 : 1;
 	if(NeedsShiftBeforeX) 
@@ -346,31 +368,31 @@ int CGenMathFFT1D::Make1DFFT(CGenMathFFT1DInfo& FFT1DInfo)
 
 	if(FFT1DInfo.Dir > 0)
 	{
-		int flags = FFTW_ESTIMATE;
-		if(DataToFFT == OutDataFFT)
-		{
-			flags |= FFTW_IN_PLACE;
-		}
-		Plan1DFFT = fftw_create_plan(Nx, FFTW_FORWARD, flags);
+		Plan1DFFT = CrPlan1D(Nx, FFTW_FORWARD);
 		if(Plan1DFFT == 0) return ERROR_IN_FFT;
 
-		fftw(Plan1DFFT, FFT1DInfo.HowMany, DataToFFT, 1, Nx, OutDataFFT, 1, Nx);
+		for (int ih = 0; ih < FFT1DInfo.HowMany; ih++)
+        {
+            fftwf_execute_dft(Plan1DFFT,
+                  (fftwf_complex*)(DataToFFT + ih * Nx),
+                  (fftwf_complex*)(OutDataFFT + ih * Nx));
+        }
 		RepairSignAfter1DFFT(OutDataFFT, FFT1DInfo.HowMany);
 		RotateDataAfter1DFFT(OutDataFFT, FFT1DInfo.HowMany);
 	}
 	else
 	{
-		int flags = FFTW_ESTIMATE;
-		if(DataToFFT == OutDataFFT)
-		{
-			flags |= FFTW_IN_PLACE;
-		}
-		Plan1DFFT = fftw_create_plan(Nx, FFTW_BACKWARD, flags);
+		Plan1DFFT = CrPlan1D(Nx, FFTW_FORWARD);
 		if(Plan1DFFT == 0) return ERROR_IN_FFT;
 
 		RotateDataAfter1DFFT(DataToFFT, FFT1DInfo.HowMany);
 		RepairSignAfter1DFFT(DataToFFT, FFT1DInfo.HowMany);
-		fftw(Plan1DFFT, FFT1DInfo.HowMany, DataToFFT, 1, Nx, OutDataFFT, 1, Nx);
+		for (int ih = 0; ih < FFT1DInfo.HowMany; ih++)
+        {
+            fftwf_execute_dft(Plan1DFFT,
+                  (fftwf_complex*)(DataToFFT + ih * Nx),
+                  (fftwf_complex*)(OutDataFFT + ih * Nx));
+        }
 	}
 	//double Mult = FFT1DInfo.xStep;
 	double Mult = FFT1DInfo.xStep*FFT1DInfo.MultExtra;
@@ -388,7 +410,7 @@ int CGenMathFFT1D::Make1DFFT(CGenMathFFT1DInfo& FFT1DInfo)
 		if(result) return result;
 	}
 
-	fftw_destroy_plan(Plan1DFFT);
+	fftwf_destroy_plan(Plan1DFFT);
 	if(m_ArrayShiftX != 0) 
 	{
 		delete[] m_ArrayShiftX; m_ArrayShiftX = 0;

@@ -95,30 +95,6 @@ public:
 			m_vBuf.push_back(pb_tmp); //Maybe not necessary?
 			return (char*)pb_tmp.buf;
 		}
-#if PY_MAJOR_VERSION < 3
-		//else if(PyBuffer_Check(obj))
-		else
-		{
-			//if(bufFlag != PyBUF_WRITABLE) return 0;
-			PyObject *pOldBuf = PyBuffer_FromReadWriteObject(obj, 0, Py_END_OF_BUFFER);
-			//if(pOldBuf == 0) return 0;
-			if(pOldBuf == 0) //RN010814
-			{
-				PyErr_Clear(); return 0;
-			}
-
-			void *pVoidBuffer = 0;
-			Py_ssize_t sizeBuf;
-			char *pRes = 0;
-			if(!PyObject_AsWriteBuffer(pOldBuf, &pVoidBuffer, &sizeBuf))
-			{
-				if (pVoidBuffer != 0) pRes = (char*)pVoidBuffer;
-			}
-			Py_DECREF(pOldBuf);
-			if(pSizeBuf != 0) *pSizeBuf = sizeBuf;
-			return pRes;
-		}
-#endif
 		return 0;
 	}
 
@@ -134,42 +110,14 @@ public:
 			return 'l';
 		}
 
-		//if(PyObject_CheckBuffer(obj)) return 'a';
 		bool isArray = PyObject_CheckBuffer(obj);
-
-#if PY_MAJOR_VERSION >= 3
 
 		if(!isArray) return 0;
 
-#endif
-
-		if(isArray)
-		{
-			if(PyObject_GetBuffer(obj, &pb, PyBUF_SIMPLE)) return 0;
-			pvb = pb.buf;
-			len = pb.len;
-			return 'a';
-		}
-
-#if PY_MAJOR_VERSION < 3
-
-		else
-		{
-			PyObject *pOldBuf = PyBuffer_FromReadWriteObject(obj, 0, Py_END_OF_BUFFER);
-			if(pOldBuf != 0)
-			{
-				if(PyObject_AsWriteBuffer(pOldBuf, &pvb, &len)) return 0;
-				else return 'a';
-			}
-			else
-			{
-				PyErr_Clear();
-				return 0;
-			}
-		}
-
-#endif
-		return 0;
+        if(PyObject_GetBuffer(obj, &pb, PyBUF_SIMPLE)) return 0;
+        pvb = pb.buf;
+        len = pb.len;
+        return 'a';
 	}
 
 	/************************************************************************//**
@@ -195,13 +143,8 @@ public:
 		bool isArray = false;
 		if(!isList) isArray = PyObject_CheckBuffer(obj);
 
-#if PY_MAJOR_VERSION >= 3
 
-		//if(!(isList || isArray)) throw strEr_BadListArray;
-		//if(!(isList || isArray)) return;
 		if(!(isList || isArray)) return 0; //OC03092016
-
-#endif
 
 		Py_buffer pb;
 		PyObject *pOldBuf = 0;
@@ -229,31 +172,6 @@ public:
 				sizeBuf = pb.len;
 			}
 
-#if PY_MAJOR_VERSION < 3
-
-			else
-			{
-				//if(PyBuffer_Check(obj))
-				//{
-				pOldBuf = PyBuffer_FromReadWriteObject(obj, 0, Py_END_OF_BUFFER);
-				if(pOldBuf != 0)
-				{
-					if(PyObject_AsWriteBuffer(pOldBuf, &pVoidBuffer, &sizeBuf)) throw strEr_BadArray;
-					isArray = true;
-					//if((pVoidBuffer == 0) || (sizeBuf <= 0)) throw strEr_BadArray;
-					//Py_DECREF(pOldBuf);
-				}
-				else
-				{
-					PyErr_Clear();
-					//return;
-					return 0; //?
-				}
-				//}
-				//else return; //obj is neither List nor Array
-			}
-
-#endif
 			//Case of Array:
 			if(arType == 'i')
 			{
@@ -504,14 +422,10 @@ public:
 			bool isArray = false;
 			if(!isList) isArray = PyObject_CheckBuffer(o);
 
-#if PY_MAJOR_VERSION >= 3
-
 			if(!treatItemAsLen1) //OC29022020
 			{
 				if(!(isList || isArray)) throw strEr_BadListArray;
 			}
-
-#endif
 
 			int nElemCur = 0;
 			if(isList) 
@@ -532,31 +446,6 @@ public:
 					//pVoidBuffer = pb.buf; //OC26022020
 					sizeBuf = pb.len;
 				}
-
-#if PY_MAJOR_VERSION < 3
-
-				else
-				{
-					PyObject *pOldBuf = PyBuffer_FromReadWriteObject(o, 0, Py_END_OF_BUFFER); //OC26022020
-					//pOldBuf = PyBuffer_FromReadWriteObject(o, 0, Py_END_OF_BUFFER);
-					if(pOldBuf != 0)
-					{
-						void *pVoidBuffer = pb.buf; //OC26022020
-
-						if(PyObject_AsWriteBuffer(pOldBuf, &pVoidBuffer, &sizeBuf)) throw strEr_BadListArray;
-						isArray = true;
-					}
-					else
-					{
-						PyErr_Clear();
-						if(!treatItemAsLen1) //OC29022020
-						{
-							throw strEr_BadListArray;
-						}
-					}
-				}
-
-#endif
 
 				nElemCur = (int)sizeBuf;
 			}
@@ -590,11 +479,9 @@ public:
 		{//seems to work with Py2.7 and maybe earlier versions
 			//pStr = PyString_AsString(pObj);
 			Py_ssize_t lenLoc = 0;
-#if PY_MAJOR_VERSION < 3
-			int res = PyString_AsStringAndSize(pObj, &pStr, &lenLoc);
-#else
+
 			int res = PyBytes_AsStringAndSize(pObj, &pStr, &lenLoc);
-#endif
+
 			if(res < 0) throw strEr_BadStr;
 			len = (int)lenLoc;
 		}
@@ -618,17 +505,12 @@ public:
 //
 //		Py_ssize_t len = 0;
 //
-//#if PY_MAJOR_VERSION < 3
-//		//if(PyString_AsStringAndSize(pObj, &arBytes, &len) == -1) throw strEr_BadStr;
-//		if(PyBytes_AsStringAndSize(pObj, &arBytes, &len) == -1) throw strEr_BadStr;
-//#else
 //		//nBytes = (int)PyBytes_Size(pObj);
 //		//if(nBytes <= 0) throw strEr_BadStr;
 //		////arBytes = new char[nBytes];
 //		//arBytes = PyBytes_AsString(pObj);
 //
 //		if(PyBytes_AsStringAndSize(pObj, &arBytes, &len) == -1) throw strEr_BadStr;
-//#endif
 //		nBytes = (int)len;
 //	}
 
@@ -637,11 +519,7 @@ public:
 	 ***************************************************************************/
 	static PyObject* Py_BuildValueChar(char inC)
 	{
-#if PY_MAJOR_VERSION >= 3
 		return Py_BuildValue("C", inC); //doesn't work with Py2.7
-#else
-		return Py_BuildValue("c", inC);
-#endif
 	}
 
 	/************************************************************************//**
@@ -649,12 +527,7 @@ public:
 	 ***************************************************************************/
 	static PyObject* Py_BuildValueByteStr(char* inStr, int len)
 	{
-#if PY_MAJOR_VERSION >= 3
 		return Py_BuildValue("y#", inStr, len);
-#else
-		//return Py_BuildValue("c#", inStr, len);
-		return Py_BuildValue("s#", inStr, len); //OC04102018
-#endif
 	}
 
 	/************************************************************************//**
@@ -681,35 +554,6 @@ public:
 				}
 			}
 		}
-
-#if PY_MAJOR_VERSION < 3
-
-		PyObject *pStrReprO = PyObject_Repr(pObj);
-		if(pStrReprO != 0)
-		{
-			char *sRepr = PyString_AsString(pStrReprO);
-			if(sRepr != 0)
-			{
-				char *pFirstDot = strchr(sRepr, '.');
-				if(pFirstDot != 0)
-				{
-					char *pEndName = strchr(pFirstDot, ' ');
-					if(pEndName != 0) 
-					{
-						long len = (long)(pEndName - (pFirstDot + 1));
-						if(len > 0)
-						{
-							if(len > maxLenStr) len = maxLenStr;
-							strncpy(c_str, pFirstDot + 1, len);
-							c_str[len] = '\0';
-						}
-					}
-				}
-			}
-			Py_DECREF(pStrReprO);
-		}
-
-#endif
 	}
 
 	/************************************************************************//**

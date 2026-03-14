@@ -33,11 +33,7 @@ struct radTIntPtrAndInt {
 
 //-------------------------------------------------------------------------
 
-#ifdef __GCC__
 typedef vector<radTIntPtrAndInt> radTVectIntPtrAndInt;
-#else
-typedef vector<radTIntPtrAndInt, allocator<radTIntPtrAndInt> > radTVectIntPtrAndInt;
-#endif
 
 //-------------------------------------------------------------------------
 
@@ -51,14 +47,11 @@ struct radTPtrsToPgnAndVect2d {
 //-------------------------------------------------------------------------
 
 struct radTVertexPointLiaison {
-#ifdef __GCC__
-	vector<int> FirstIndVect;
-	vector<int> SecondIndVect;
-#else
-	vector<int, allocator<int> > FirstIndVect;
-	vector<int, allocator<int> > SecondIndVect;
-#endif
-	char AdjSegmentUsed;
+
+vector<int> FirstIndVect;
+vector<int> SecondIndVect;
+
+char AdjSegmentUsed;
 
 	radTVertexPointLiaison() { AdjSegmentUsed = 0;}
 };

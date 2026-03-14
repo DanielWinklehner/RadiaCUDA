@@ -14,7 +14,14 @@
 #ifndef __GMFFT_H
 #define __GMFFT_H
 
-#include "fftw.h"
+#include <fftw3.h>
+
+// FFTW3 uses float[2] for CmplxF, which has no .re/.im
+// and is not assignable. This struct is layout-compatible and
+// restores the FFTW2-style access pattern.
+struct CmplxF {
+    float re, im;
+};
 
 //#ifdef __IGOR_PRO__
 //#include "srigintr.h"
@@ -162,12 +169,12 @@ public:
 		CosAndSin(-q*t0TwoPI, *tm, *(tm+1));
 	}
 
-	void RotateDataAfter2DFFT(FFTW_COMPLEX* pAfterFFT)
+	void RotateDataAfter2DFFT(CmplxF* pAfterFFT)
 	{// Assumes Nx, Ny even !
 		long HalfNyNx = HalfNy*Nx;
-		FFTW_COMPLEX *t1 = pAfterFFT, *t2 = pAfterFFT + HalfNyNx + HalfNx;
-	    FFTW_COMPLEX *t3 = pAfterFFT + HalfNx, *t4 = pAfterFFT + HalfNyNx;
-		FFTW_COMPLEX Buf;
+		CmplxF *t1 = pAfterFFT, *t2 = pAfterFFT + HalfNyNx + HalfNx;
+	    CmplxF *t3 = pAfterFFT + HalfNx, *t4 = pAfterFFT + HalfNyNx;
+		CmplxF Buf;
 		for(long jj=0; jj<HalfNy; jj++)
 		{
 			for(long ii=0; ii<HalfNx; ii++)
@@ -179,10 +186,10 @@ public:
 		}
 	}
 
-	void RepairSignAfter2DFFT(FFTW_COMPLEX* pAfterFFT)
+	void RepairSignAfter2DFFT(CmplxF* pAfterFFT)
 	{// Assumes Nx, Ny even !
-		FFTW_COMPLEX *t = pAfterFFT;
-		FFTW_REAL sx0 = 1., sy0 = 1., s;
+		CmplxF *t = pAfterFFT;
+		float sx0 = 1., sy0 = 1., s;
 		for(long iy=0; iy<Ny; iy++)
 		{
 			s = sy0*sx0;
@@ -194,22 +201,22 @@ public:
 		}
 	}
 
-	void NormalizeDataAfter2DFFT(FFTW_COMPLEX* pAfterFFT, double Mult)
+	void NormalizeDataAfter2DFFT(CmplxF* pAfterFFT, double Mult)
 	{// Assumes Nx, Ny even !
 		long NxNy = Nx*Ny;
-		FFTW_COMPLEX *t = pAfterFFT;
+		CmplxF *t = pAfterFFT;
 		for(long i=0; i<NxNy; i++)
 		{
-			t->re *= (FFTW_REAL)Mult; (t++)->im *= (FFTW_REAL)Mult;
+			t->re *= (float)Mult; (t++)->im *= (float)Mult;
 		}
 	}
 
-	void TreatShifts(FFTW_COMPLEX* pData)
+	void TreatShifts(CmplxF* pData)
 	{
 		char NeedsShiftX = NeedsShiftBeforeX || NeedsShiftAfterX;
 		char NeedsShiftY = NeedsShiftBeforeY || NeedsShiftAfterY;
 
-		FFTW_COMPLEX *t = pData;
+		CmplxF *t = pData;
 		float *tShiftY = ArrayShiftY;
 		float MultY_Re = 1., MultY_Im = 0., MultX_Re = 1., MultX_Im = 0.;
 		float MultRe, MultIm;
@@ -359,19 +366,19 @@ public:
 		CosAndSin(-q*t0TwoPI, *tm, *(tm+1));
 	}
 
-	void TreatShift(FFTW_COMPLEX* pData, long HowMany)
+	void TreatShift(CmplxF* pData, long HowMany)
 	{
 		char NeedsShiftX = NeedsShiftBeforeX || NeedsShiftAfterX;
 		if(!NeedsShiftX) return;
 
-		FFTW_COMPLEX *t = pData;
+		CmplxF *t = pData;
 		float *tShiftX = m_ArrayShiftX;
 
 		for(long ix=0; ix<Nx; ix++)
 		{
 			float MultX_Re = *(tShiftX++), MultX_Im = *(tShiftX++);
 
-			FFTW_COMPLEX *tMany = t++;
+			CmplxF *tMany = t++;
 			for(long k=0; k<HowMany; k++)
 			{
 				float NewRe = tMany->re*MultX_Re - tMany->im*MultX_Im;
@@ -383,15 +390,15 @@ public:
 		}
 	}
 
-	void RepairSignAfter1DFFT(FFTW_COMPLEX* pAfterFFT, long HowMany)
+	void RepairSignAfter1DFFT(CmplxF* pAfterFFT, long HowMany)
 	{// Assumes Nx even !
-		FFTW_COMPLEX *t = pAfterFFT;
+		CmplxF *t = pAfterFFT;
 		int s = 1;
 		for(long ix=0; ix<Nx; ix++)
 		{
 			if(s < 0)
 			{
-				FFTW_COMPLEX *tMany = t;
+				CmplxF *tMany = t;
 				for(long k=0; k<HowMany; k++)
 				{
 					tMany->re = -tMany->re; tMany->im = -tMany->im;
@@ -402,13 +409,13 @@ public:
 		}
 	}
 
-	void RotateDataAfter1DFFT(FFTW_COMPLEX* pAfterFFT, long HowMany)
+	void RotateDataAfter1DFFT(CmplxF* pAfterFFT, long HowMany)
 	{// Assumes Nx even !
-		FFTW_COMPLEX *t1 = pAfterFFT, *t2 = pAfterFFT + HalfNx;
-		FFTW_COMPLEX Buf;
+		CmplxF *t1 = pAfterFFT, *t2 = pAfterFFT + HalfNx;
+		CmplxF Buf;
 		for(long ix=0; ix<HalfNx; ix++)
 		{
-			FFTW_COMPLEX *t1Many = t1++, *t2Many = t2++;
+			CmplxF *t1Many = t1++, *t2Many = t2++;
 			for(long k=0; k<HowMany; k++)
 			{
 				Buf = *t1Many; *t1Many = *t2Many; *t2Many = Buf;
@@ -417,15 +424,15 @@ public:
 		}
 	}
 
-	void NormalizeDataAfter1DFFT(FFTW_COMPLEX* pAfterFFT, long HowMany, double Mult)
+	void NormalizeDataAfter1DFFT(CmplxF* pAfterFFT, long HowMany, double Mult)
 	{// Assumes Nx even !
-		FFTW_COMPLEX *t = pAfterFFT;
+		CmplxF *t = pAfterFFT;
 		for(long ix=0; ix<Nx; ix++)
 		{
-			FFTW_COMPLEX *tMany = t++;
+			CmplxF *tMany = t++;
 			for(long k=0; k<HowMany; k++)
 			{
-				tMany->re *= (FFTW_REAL)Mult; tMany->im *= (FFTW_REAL)Mult;
+				tMany->re *= (float)Mult; tMany->im *= (float)Mult;
 				tMany += Nx;
 			}
 		}
