@@ -1336,7 +1336,7 @@ void radTRelaxationMethNo_7::SetupMainInteractionData(const radThg& hg, const ra
 	IntrctPtr = new radTInteraction(hg, hEmpty, CompCrit, 1, 1, 1);
 	if(IntrctPtr->SomethingIsWrong)
 	{
-        delete[] IntrctPtr; IntrctPtr = NULL;
+        delete IntrctPtr; IntrctPtr = NULL;
 	}
 }
 
