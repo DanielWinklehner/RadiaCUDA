@@ -22,6 +22,14 @@ find_library(FFTW3F_LIB NAMES fftw3f fftwf REQUIRED)
 find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h REQUIRED)
 
 if(RADIA_WITH_MPI)
+    if(WIN32)
+        # Intel MPI from conda on Windows
+        set(MPI_CXX_ADDITIONAL_INCLUDE_DIRS "$ENV{CONDA_PREFIX}/Library/include")
+        set(MPI_CXX_LIB_NAMES "impi" "impicxx")
+        set(MPI_impi_LIBRARY "$ENV{CONDA_PREFIX}/Library/lib/impi.lib")
+        set(MPI_impicxx_LIBRARY "$ENV{CONDA_PREFIX}/Library/lib/impicxx.lib")
+        set(MPI_CXX_HEADER_DIR "$ENV{CONDA_PREFIX}/Library/include")
+    endif()
     find_package(MPI REQUIRED COMPONENTS CXX)
 endif()
 

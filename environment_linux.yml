@@ -17,5 +17,13 @@ dependencies:
   - intel-openmp
   - cupy
   - cuda-toolkit=12.6
+  - gmsh>=4.15
+  - python-gmsh
+  - yaml
+  - pyyaml
+  - mpi4py
+  - sympy
+  - tqdm
   - openmpi
+  - openmpi-mpicc
   - pip

@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "radia"
-version = "4.200"
+version = "4.3"
 description = "Radia 3D magnetostatics with CUDA support"
 authors = [
     {name = "O. Chubar, P. Elleaume, J. Chavanne, D. Winklehner, Claude"},
