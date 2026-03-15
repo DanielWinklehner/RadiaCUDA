@@ -181,12 +181,6 @@ You forgot to activate MSVC. Run `vcvars64.bat` first (Step 2), then activate co
 This warning is harmless. The `set CMAKE_BUILD_TYPE=Release` environment variable ensures
 the correct build type is used.
 
-### Solver does not converge / produces garbage results
-
-Check that you are building in Release mode. In the build output, look for `/O2` (optimized).
-If you see `/Od` (no optimization) and `-MDd` (debug runtime), the build is in Debug mode.
-Re-run Step 4 and rebuild.
-
 ### "This function is not implemented on that platform" from ObjDrwOpenGL
 
 This is expected — the OpenGL 3D viewer is not available on Windows. The examples handle
@@ -198,11 +192,6 @@ this gracefully and skip 3D visualization.
 - If using mpi4py, use `rad.UtiMPI('in')` instead of `rad.UtiMPI('on')`
 - Do not mix system-installed MS-MPI with conda's Intel MPI
 
-### LNK4006 warnings during build
-
-If you see `LNK4006` warnings about duplicate symbols, ensure `radplnr2_old.cpp` has been
-deleted from `cpp/src/core/`.
-
 ---
 
 ## Quick Reference: Complete Build Sequence
@@ -212,8 +201,6 @@ For returning users, the complete build sequence in a single block:
 ```cmd
 "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 conda activate radiacuda
-set CMAKE_BUILD_TYPE=Release
 cd C:\path\to\RadiaCUDA
 pip install . -v --no-build-isolation
 python -c "import radia as rad; print('Radia version:', rad.UtiVer())"
-```

@@ -65,7 +65,16 @@ if(MSVC)
     )
 else()
     target_compile_options(radia_core PRIVATE
-        -O3 -Wall -Wno-sign-compare -Wno-unused-variable
+        -O3 -Wall
+        -Wno-sign-compare
+        -Wno-unused-variable
+        -Wno-unused-but-set-variable
+        -Wno-misleading-indentation
+        -Wno-parentheses
+        -Wno-comment
+        -Wno-unknown-pragmas
+        -Wno-stringop-truncation
+        -Wno-char-subscripts
     )
 endif()
 
