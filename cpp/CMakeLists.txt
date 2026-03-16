@@ -87,6 +87,31 @@ if(RADIA_WITH_MPI)
     target_link_libraries(radia_core PUBLIC MPI::MPI_CXX)
 endif()
 
+# CUDA GPU-accelerated relaxation
+if(RADIA_WITH_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+
+    add_library(radia_cuda STATIC
+        ${RAD_CORE_DIR}/radgpurlx.cu
+        ${RAD_CORE_DIR}/radgpu_asm.cu
+    )
+    set_target_properties(radia_cuda PROPERTIES
+        CUDA_ARCHITECTURES "70;75;80;86;89;90"
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_include_directories(radia_cuda PRIVATE
+        ${RAD_CORE_DIR}
+        ${RAD_LIB_DIR}
+    )
+    target_compile_definitions(radia_cuda PUBLIC RADIA_WITH_CUDA)
+    target_link_libraries(radia_cuda PUBLIC CUDA::cudart)
+
+    target_compile_definitions(radia_core PUBLIC RADIA_WITH_CUDA)
+    target_link_libraries(radia_core PUBLIC radia_cuda)
+endif()
+
 # Math library (Unix only)
 if(UNIX)
     target_link_libraries(radia_core PUBLIC m pthread dl)

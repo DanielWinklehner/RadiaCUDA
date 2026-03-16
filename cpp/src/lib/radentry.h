@@ -739,10 +739,11 @@ The relaxation stops whenever the change of magnetization (averaged over all sub
 @param iter [in] maximum number of iterations permitted to reach the specified precision
 @param meth [in] an integer number specifying the method of relaxation to be used (values 0, 3 - 5 can be used; 0 means default method)
 @param opt [in] pointer to an option string, which can be "ResetM->True" (default) or "ResetM->False"
+@param opt [in] pointer to an option string, which can be "omega>0.3" (default) or another value below 1.0
 @return integer error code (0 : no error, >0 : error number, <0 : warning number)
 @author O.C.
 */ 
-EXP int CALL RadRlxAuto(double* D, int* n, int intrc, double prec, int iter, int meth, const char* opt);
+EXP int CALL RadRlxAuto(double* D, int* n, int intrc, double prec, int iter, int meth, const char* opt, const char* opt2="");
 
 /** Updates external field data for the relaxation (to take into account e.g. modification of currents in coils, if any) without rebuilding the interaction matrix.
 @param intrc [in] an integer number referencing the interaction object
@@ -762,7 +763,7 @@ The relaxation stops whenever the change of magnetization (averaged over all sub
 @return integer error code (0 : no error, >0 : error number, <0 : warning number)
 @author P.E., O.C.
 */ 
-EXP int CALL RadSolve(double* D, int* n, int obj, double prec, int iter, int meth);
+EXP int CALL RadSolve(double* D, int* n, int obj, double prec, int iter, int meth, const char* opt2="");
 
 /** Computes magnetic field created by the object obj at one or many points.
 @param B [out] flat array of all computed values of the magnetic field components (should be allocated by calling function)

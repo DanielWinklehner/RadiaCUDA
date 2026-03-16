@@ -663,5 +663,10 @@ public:
 };
 
 //-------------------------------------------------------------------------
+//-------------------------------------------------------------------------
+
+#ifdef RADIA_WITH_CUDA
+int radGPU_AutoRelax(radTInteraction* IntrctPtr, double PrecOnMagnetiz, int MaxIterNumber, char MagnResetIsNotNeeded=0, double omega=-1.0);
+#endif
 
 #endif

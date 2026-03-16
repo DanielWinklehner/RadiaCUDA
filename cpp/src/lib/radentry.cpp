@@ -85,9 +85,9 @@ void ShowInteractMatrix(int);
 void ShowInteractVector(int, char*);
 void ManualRelax( int, int, int, double );
 //void AutoRelax( int, double, int, int );
-void AutoRelaxOpt( int, double, int, int, const char* );
+void AutoRelaxOpt( int, double, int, int, const char*, const char* Opt2="" );
 void UpdateSourcesForRelax( int );
-void SolveGen( int, double, int, int );
+void SolveGen( int, double, int, int, const char* Opt1="" );
 
 void FieldArbitraryPointsArray( long, const char*, double**, long );
 void Field( int, char*, double,double,double, double,double,double, int, char*, double );
@@ -941,10 +941,9 @@ int CALL RadRlxMan(double* dOut, int* nOut, int Intrc, int Meth, int IterNum, do
 
 //-------------------------------------------------------------------------
 
-int CALL RadRlxAuto(double* dOut, int* nOut, int Intrc, double Prec, int MaxIter, int Meth, const char* Opt1)
+int CALL RadRlxAuto(double* dOut, int* nOut, int Intrc, double Prec, int MaxIter, int Meth, const char* Opt1, const char* Opt2)
 {
-	//AutoRelax(Intrc, Prec, MaxIter, Meth);
-	AutoRelaxOpt(Intrc, Prec, MaxIter, Meth, Opt1); //OC240408
+	AutoRelaxOpt(Intrc, Prec, MaxIter, Meth, Opt1, Opt2);
 
 	int ErrStat = ioBuffer.OutErrorStatus();
 	if(ErrStat > 0) return ErrStat;
@@ -1669,9 +1668,9 @@ int CALL RadTrfZerPerp(int* n, int obj, double* P, double* N)
 
 //-------------------------------------------------------------------------
 
-int CALL RadSolve(double* dOut, int* nOut, int obj, double prec, int iter, int meth)
+int CALL RadSolve(double* dOut, int* nOut, int obj, double prec, int iter, int meth, const char* Opt2)
 {
-	SolveGen(obj, prec, iter, meth);
+	SolveGen(obj, prec, iter, meth, Opt2);
 
 	int ErrStat = ioBuffer.OutErrorStatus();
 	if(ErrStat > 0) return ErrStat;

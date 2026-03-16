@@ -18,6 +18,10 @@
 #include "radintrc.h"
 #include "radsbdrc.h"
 
+#ifdef RADIA_WITH_CUDA
+#include "radgpu_asm.h"
+#endif
+
 #ifdef _WITH_MPI
 #include <mpi.h>
 #endif
@@ -495,6 +499,190 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 	//--New
 	int AmOfElemWithSym = CountRelaxElemsWithSym();
 	//--EndNew
+
+#ifdef RADIA_WITH_CUDA
+	if(m_nProcMPI < 2)
+	{
+		RadGPU_PolyData polyData;
+		RadGPU_RecMagData recData;
+		RadGPU_SymData symData;
+		RadGPU_AsmResult result;
+		memset(&polyData, 0, sizeof(polyData));
+		memset(&recData, 0, sizeof(recData));
+		memset(&symData, 0, sizeof(symData));
+		memset(&result, 0, sizeof(result));
+
+		if(radGPU_PackGeometryForAsm(this, &polyData, &recData, &symData))
+		{
+			if(radGPU_AssembleMatrix(&polyData, &recData, &symData, &result) == 0)
+			{
+				// Don't unpack yet — let CPU run, then compare
+				// CPU path runs below and fills InteractMatrix
+				// After CPU fills it, compare:
+
+				// Fall through to CPU path...
+				// After CPU completes, compare GPU vs CPU:
+				// (we stash the GPU result for now)
+
+				// Run CPU path first (fall through)
+
+				// === CPU assembly ===
+				for(int ColNo=0; ColNo<AmOfMainElem; ColNo++)
+				{
+					FillInTransPtrVectForElem(ColNo, 'I');
+					radTg3dRelax* g3dRelaxPtrColNo = g3dRelaxPtrVect[ColNo];
+					for(int StrNo=0; StrNo<AmOfMainElem; StrNo++)
+					{
+						TVector3d InitObsPoiVect = MainTransPtrArray[StrNo]->TrPoint((g3dRelaxPtrVect[StrNo])->ReturnCentrPoint());
+						TMatrix3d SubMatrix(ZeroVect, ZeroVect, ZeroVect), BufSubMatrix;
+						for(unsigned i=0; i<TransPtrVect.size(); i++)
+						{
+							TVector3d ObsPoiVect = TransPtrVect[i]->TrPoint_inv(InitObsPoiVect);
+							radTField Field(FieldKeyInteract, CompCriterium, ObsPoiVect, ZeroVect, ZeroVect, ZeroVect, ZeroVect, 0.);
+							Field.AmOfIntrctElemWithSym = AmOfElemWithSym;
+							g3dRelaxPtrColNo->B_comp(&Field);
+							BufSubMatrix.Str0 = Field.B;
+							BufSubMatrix.Str1 = Field.H;
+							BufSubMatrix.Str2 = Field.A;
+							TransPtrVect[i]->TrMatrix(BufSubMatrix);
+							SubMatrix += BufSubMatrix;
+						}
+						MainTransPtrArray[StrNo]->TrMatrix_inv(SubMatrix);
+						InteractMatrix[StrNo][ColNo] = SubMatrix;
+					}
+					EmptyTransPtrVect();
+				}
+
+				// === Compare GPU vs CPU ===
+				double maxErr = 0, maxRel = 0;
+				int worstI = 0, worstJ = 0;
+				for(int i = 0; i < AmOfMainElem && i < 50; i++) {
+					for(int j = 0; j < AmOfMainElem && j < 50; j++) {
+						long long idx = ((long long)i * AmOfMainElem + j) * 9;
+						TMatrix3df& cpu = InteractMatrix[i][j];
+						float* gpu = &result.matrix_blocks[idx];
+
+						float cpuVals[9] = {
+							cpu.Str0.x, cpu.Str0.y, cpu.Str0.z,
+							cpu.Str1.x, cpu.Str1.y, cpu.Str1.z,
+							cpu.Str2.x, cpu.Str2.y, cpu.Str2.z
+						};
+						for(int k = 0; k < 9; k++) {
+							double err = fabs((double)gpu[k] - (double)cpuVals[k]);
+							double ref = fabs((double)cpuVals[k]);
+							double rel = (ref > 1e-15) ? err / ref : err;
+							if(err > maxErr) {
+								maxErr = err;
+								maxRel = rel;
+								worstI = i; worstJ = j;
+							}
+						}
+					}
+				}
+				fprintf(stderr, "GPU vs CPU: maxAbsErr=%.6e maxRelErr=%.6e at [%d][%d]\n",
+				        maxErr, maxRel, worstI, worstJ);
+
+				// Print one block for inspection
+				{
+					int si = 0, sj = 1;
+					long long idx = ((long long)si * AmOfMainElem + sj) * 9;
+					TMatrix3df& cpu = InteractMatrix[si][sj];
+					float* gpu = &result.matrix_blocks[idx];
+					fprintf(stderr, "CPU[%d][%d]:\n  %.6e %.6e %.6e\n  %.6e %.6e %.6e\n  %.6e %.6e %.6e\n",
+					        si, sj,
+					        cpu.Str0.x, cpu.Str0.y, cpu.Str0.z,
+					        cpu.Str1.x, cpu.Str1.y, cpu.Str1.z,
+					        cpu.Str2.x, cpu.Str2.y, cpu.Str2.z);
+					fprintf(stderr, "GPU[%d][%d]:\n  %.6e %.6e %.6e\n  %.6e %.6e %.6e\n  %.6e %.6e %.6e\n",
+					        si, sj,
+					        gpu[0], gpu[1], gpu[2],
+					        gpu[3], gpu[4], gpu[5],
+					        gpu[6], gpu[7], gpu[8]);
+				}
+
+				// Also print diagonal element
+				{
+					int si = 0, sj = 0;
+					long long idx = ((long long)si * AmOfMainElem + sj) * 9;
+					TMatrix3df& cpu = InteractMatrix[si][sj];
+					float* gpu = &result.matrix_blocks[idx];
+					fprintf(stderr, "CPU[%d][%d]:\n  %.6e %.6e %.6e\n  %.6e %.6e %.6e\n  %.6e %.6e %.6e\n",
+					        si, sj,
+					        cpu.Str0.x, cpu.Str0.y, cpu.Str0.z,
+					        cpu.Str1.x, cpu.Str1.y, cpu.Str1.z,
+					        cpu.Str2.x, cpu.Str2.y, cpu.Str2.z);
+                    fprintf(stderr, "GPU[%d][%d]:\n  %.6e %.6e %.6e\n  %.6e %.6e %.6e\n  %.6e %.6e %.6e\n",
+					        si, sj,
+					        gpu[0], gpu[1], gpu[2],
+					        gpu[3], gpu[4], gpu[5],
+					        gpu[6], gpu[7], gpu[8]);
+				}
+
+                // === Minimal diagnostic: raw field, no symmetry ===
+				{
+					int si = 0, sj = 1;
+					// CPU: direct B_comp with PreRelax
+					TVector3d obsP = (g3dRelaxPtrVect[si])->ReturnCentrPoint();
+					radTField Field(FieldKeyInteract, CompCriterium, obsP,
+					                ZeroVect, ZeroVect, ZeroVect, ZeroVect, 0.);
+					Field.AmOfIntrctElemWithSym = AmOfElemWithSym;
+					g3dRelaxPtrVect[sj]->B_comp(&Field);
+
+					fprintf(stderr, "RAW CPU B_comp [%d]<-[%d] (no sym, no trans):\n"
+					        "  B:  %.6e %.6e %.6e\n"
+					        "  H:  %.6e %.6e %.6e\n"
+					        "  A:  %.6e %.6e %.6e\n",
+					        si, sj,
+					        Field.B.x, Field.B.y, Field.B.z,
+					        Field.H.x, Field.H.y, Field.H.z,
+					        Field.A.x, Field.A.y, Field.A.z);
+
+					// GPU raw block (identity symmetry = first copy only)
+					long long idx = ((long long)si * AmOfMainElem + sj) * 9;
+					float* gpu = &result.matrix_blocks[idx];
+					fprintf(stderr, "GPU block [%d][%d] (all copies summed):\n"
+					        "  %.6e %.6e %.6e\n"
+					        "  %.6e %.6e %.6e\n"
+					        "  %.6e %.6e %.6e\n",
+					        si, sj,
+					        gpu[0], gpu[1], gpu[2],
+					        gpu[3], gpu[4], gpu[5],
+					        gpu[6], gpu[7], gpu[8]);
+
+					// Also print the obs center used by GPU vs raw center
+					TVector3d rawCP = g3dRelaxPtrVect[si]->ReturnCentrPoint();
+					TVector3d trfCP = MainTransPtrArray[si]->TrPoint(rawCP);
+					fprintf(stderr, "Obs center raw:  %.6f %.6f %.6f\n", rawCP.x, rawCP.y, rawCP.z);
+					fprintf(stderr, "Obs center trf:  %.6f %.6f %.6f\n", trfCP.x, trfCP.y, trfCP.z);
+				}
+
+				radGPU_FreeAsmData(&polyData, &recData, &result);
+
+				// CPU path already ran above — do the fixup and return
+				for(int ClNo=0; ClNo<AmOfMainElem; ClNo++)
+				{
+					radTg3dRelax* g3dRelaxPtrClNo = g3dRelaxPtrVect[ClNo];
+					g3dRelaxPtrVect[ClNo] = g3dRelaxPtrClNo->FormalIntrctMemberPtr();
+				}
+				return 1;
+			}
+			else
+			{
+				fprintf(stderr, "GPU assembly: kernel failed, falling back to CPU\n");
+				radGPU_FreeAsmData(&polyData, &recData, &result);
+			}
+		}
+		else
+		{
+			fprintf(stderr, "GPU assembly: packing failed, falling back to CPU\n");
+		}
+	}
+#endif
+
+
+
+
+
 
 	if(m_nProcMPI < 2) //OC01012020
 	{

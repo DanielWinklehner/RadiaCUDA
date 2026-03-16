@@ -234,8 +234,9 @@ def flatten(obj_id):
 
     traverse(obj_id)
 
-    if skipped_types:
-        print(f"Skipped {skipped_types}")
+    # TODO: Couple this to verbosity/debug flag/variable
+    # if skipped_types:
+    #     print(f"Skipped {skipped_types}")
 
     if not poly_ids and not rec_ids:
         raise ValueError("No supported elements found in geometry")

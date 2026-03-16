@@ -128,15 +128,18 @@ def _find_coil_container(obj_id):
 # ═══════════════════════════════════════════════════════════════
 
 def FldGPU(obj_id, points, component='b', symmetries=None,
-           cache=True, verbose=False):
+           cache=True, verbose=False, rank=0, comm=None):
     """Compute magnetic field using GPU acceleration.
 
     Drop-in acceleration for rad.Fld(). On first call, analyzes the
     geometry, separates iron from coils, flattens iron for GPU, and
     caches everything. Subsequent calls reuse the cache.
 
-    Iron field is computed on GPU. Coil field (analytical) is computed
-    on CPU via Radia and added automatically.
+    Iron field is computed on GPU (rank 0 only). Coil field (analytical)
+    is computed on CPU via Radia using MPI across all ranks.
+
+    All ranks must call this function when MPI is active, so that
+    rad.Fld() for coils can operate collectively.
 
     Parameters
     ----------
@@ -173,46 +176,49 @@ def FldGPU(obj_id, points, component='b', symmetries=None,
         between calls. Call invalidate_cache() after re-solving
         or modifying geometry.
     verbose : bool
-        Print diagnostic info on first call.
+        Print diagnostic info on first call (use verbose=(rank==0)
+        with MPI to avoid duplicate output).
+    rank : int
+        MPI rank. Only rank 0 performs GPU computation and geometry
+        analysis. Default 0 (single-process mode).
+    comm : MPI communicator or None
+        MPI communicator from mpi4py (e.g. MPI.COMM_WORLD).
+        Required when running with MPI so that coil object ID
+        can be broadcast to all ranks.
 
     Returns
     -------
-    ndarray
-        Field values. Shape (Np, 3) for 'b', (Np,) for components.
-        For a single point with component='b', returns shape (3,).
+    ndarray or None
+        On rank 0: field values. Shape (Np, 3) for 'b', (Np,) for
+        components. For a single point with component='b', returns
+        shape (3,).
+        On rank > 0: returns None.
 
     Examples
     --------
-    Single point:
+    Single process:
 
-    >>> B = FldGPU(model, [100, 50, 0])
+    > B = FldGPU(model, pts, symmetries=symmetries)
 
-    Many points (fast):
+    With MPI:
 
-    >>> pts = np.column_stack([x.ravel(), y.ravel(), z.ravel()])
-    >>> B = FldGPU(model, pts)
-
-    With symmetries:
-
-    >>> B = FldGPU(model, pts, symmetries=[
-    ...     ('perp', [0,0,0], [1,-1,0]),
-    ...     ('perp', [0,0,0], [1,0,0]),
-    ...     ('perp', [0,0,0], [0,1,0]),
-    ...     ('para', [0,0,0], [0,0,1]),
-    ... ])
-
-    Field components:
-
-    >>> Bz = FldGPU(model, pts, component='bz', symmetries=symmetries)
+    > from mpi4py import MPI
+    > comm = MPI.COMM_WORLD
+    > rank = comm.Get_rank()
+    > B = FldGPU(model, pts, symmetries=symmetries,
+    ...            rank=rank, comm=comm, verbose=(rank==0))
+    > if rank == 0:
+    ...     print(B.shape)
 
     After re-solving:
 
-    >>> invalidate_cache(model)
-    >>> B = FldGPU(model, pts, symmetries=symmetries)
+    > invalidate_cache(model)
+    > B = FldGPU(model, pts, symmetries=symmetries,
+    ...            rank=rank, comm=comm)
     """
     global _cache
 
-    # ── Normalize points ──
+    # ── Normalize points (all ranks need this for rad.Fld) ──
     pts = np.asarray(points, dtype=np.float64)
     single_point = False
     if pts.ndim == 1:
@@ -227,74 +233,88 @@ def FldGPU(obj_id, points, component='b', symmetries=None,
     else:
         raise ValueError(f"Expected 1D or 2D array, got {pts.ndim}D")
 
-    # ── Check cache ──
-    if cache and obj_id in _cache:
-        cached = _cache[obj_id]
-        geo = cached['geo']
-        gpu_geo = cached['gpu_geo']
-        coil_obj = cached['coil_obj']
-    else:
-        # ── First call: analyze geometry ──
-        if verbose:
-            print(f"FldGPU: Analyzing Radia object {obj_id}...", flush=True)
+    # ── Rank 0: analyze geometry, flatten, upload to GPU ──
+    geo = None
+    gpu_geo = None
+    coil_id = -1
 
-        iron_ids, coil_ids, skipped = _classify_objects(obj_id)
-
-        if verbose:
-            print(f"  Iron elements: {len(iron_ids)}", flush=True)
-            print(f"  Coil elements: {len(coil_ids)}", flush=True)
-            if skipped:
-                print(f"  Skipped:       {skipped}", flush=True)
-
-        if len(iron_ids) == 0 and len(coil_ids) == 0:
-            raise ValueError("No supported elements found in geometry")
-
-        # Find coil container
-        coil_obj = _find_coil_container(obj_id) if coil_ids else None
-
-        if verbose and coil_obj is not None:
-            print(f"  Coil object:   {coil_obj}", flush=True)
-
-        # Flatten iron geometry
-        if iron_ids:
-            if verbose:
-                print("  Flattening...", flush=True)
-            geo = flatten(obj_id)
-            if verbose:
-                geo.summary()
+    if rank == 0:
+        if cache and obj_id in _cache:
+            cached = _cache[obj_id]
+            geo = cached['geo']
+            gpu_geo = cached['gpu_geo']
+            coil_id = cached['coil_obj'] if cached['coil_obj'] is not None else -1
         else:
-            geo = None
+            if verbose:
+                print(f"FldGPU: Analyzing Radia object {obj_id}...",
+                      flush=True)
 
-        # Upload to GPU
-        gpu_geo = GPUGeometry(geo) if geo is not None else None
+            iron_ids, coil_ids, skipped = _classify_objects(obj_id)
 
-        if verbose:
-            print("  GPU ready.", flush=True)
+            if verbose:
+                print(f"  Iron elements: {len(iron_ids)}", flush=True)
+                print(f"  Coil elements: {len(coil_ids)}", flush=True)
+                if skipped:
+                    print(f"  Skipped:       {skipped}", flush=True)
 
-        # Cache
-        if cache:
-            _cache[obj_id] = {
-                'geo': geo,
-                'gpu_geo': gpu_geo,
-                'coil_obj': coil_obj,
-            }
+            if len(iron_ids) == 0 and len(coil_ids) == 0:
+                raise ValueError("No supported elements found in geometry")
 
-    # ── Compute field ──
-    if geo is not None and gpu_geo is not None:
-        result = fld_gpu(geo, pts, component='b', gpu_geo=gpu_geo,
-                         symmetries=symmetries, coil_obj=coil_obj)
-    else:
-        # No iron — coils only
-        result = np.zeros((len(pts), 3), dtype=np.float64)
-        if coil_obj is not None:
-            result += np.array(rad.Fld(coil_obj, 'b', pts.tolist()))
+            coil_obj = _find_coil_container(obj_id) if coil_ids else None
+            coil_id = coil_obj if coil_obj is not None else -1
 
-    # ── Return in requested format ──
-    if component == 'b':
-        return result[0] if single_point else result
-    elif component in ('bx', 'by', 'bz'):
-        idx = {'bx': 0, 'by': 1, 'bz': 2}[component]
-        col = result[:, idx]
-        return float(col[0]) if single_point else col
-    else:
-        raise ValueError(f"Unknown component: {component}")
+            if verbose and coil_obj is not None:
+                print(f"  Coil object:   {coil_obj}", flush=True)
+
+            if iron_ids:
+                if verbose:
+                    print("  Flattening...", flush=True)
+                geo = flatten(obj_id)
+                if verbose:
+                    geo.summary()
+            else:
+                geo = None
+
+            gpu_geo = GPUGeometry(geo) if geo is not None else None
+
+            if verbose:
+                print("  GPU ready.", flush=True)
+
+            if cache:
+                _cache[obj_id] = {
+                    'geo': geo,
+                    'gpu_geo': gpu_geo,
+                    'coil_obj': coil_obj,
+                }
+
+    # ── Broadcast coil ID so all ranks can participate in rad.Fld ──
+    if comm is not None:
+        coil_id = comm.bcast(coil_id, root=0)
+
+    # ── Coil field: ALL ranks participate (MPI collective) ──
+    B_coil = None
+    if coil_id >= 0:
+        B_coil = np.array(rad.Fld(coil_id, 'b', pts.tolist()))
+
+    # ── GPU iron field: rank 0 only ──
+    if rank == 0:
+        if geo is not None and gpu_geo is not None:
+            result = fld_gpu(geo, pts, component='b', gpu_geo=gpu_geo,
+                             symmetries=symmetries)
+        else:
+            result = np.zeros((len(pts), 3), dtype=np.float64)
+
+        if B_coil is not None:
+            result += B_coil
+
+        if component == 'b':
+            return result[0] if single_point else result
+        elif component in ('bx', 'by', 'bz'):
+            idx = {'bx': 0, 'by': 1, 'bz': 2}[component]
+            col = result[:, idx]
+            return float(col[0]) if single_point else col
+        else:
+            raise ValueError(f"Unknown component: {component}")
+
+    # Ranks > 0: no result
+    return None

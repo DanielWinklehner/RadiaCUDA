@@ -2298,31 +2298,29 @@ static PyObject* radia_RlxMan(PyObject* self, PyObject* args)
  ***************************************************************************/
 static PyObject* radia_RlxAuto(PyObject* self, PyObject* args)
 {
-	PyObject *oOpt=0, *oResInd=0;
+	PyObject *oOpt1=0, *oOpt2=0, *oResInd=0;
 	try
 	{
-		int ind=0, numIt=0, meth=4; //OC30122019
-		//int ind=0, numIt=0, meth=0;
+		int ind=0, numIt=0, meth=4;
 		double prec = 0;
-		if(!PyArg_ParseTuple(args, "idi|iO:RlxAuto", &ind, &prec, &numIt, &meth, &oOpt)) throw CombErStr(strEr_BadFuncArg, ": RlxAuto");
-		//if(!PyArg_ParseTuple(args, "idii|O:RlxAuto", &ind, &prec, &numIt, &meth, &oOpt)) throw CombErStr(strEr_BadFuncArg, ": RlxAuto");
+		if(!PyArg_ParseTuple(args, "idi|iOO:RlxAuto", &ind, &prec, &numIt, &meth, &oOpt1, &oOpt2)) throw CombErStr(strEr_BadFuncArg, ": RlxAuto");
 		if(ind == 0) throw CombErStr(strEr_BadFuncArg, ": RlxAuto");
 
-		char sOpt[1024]; *sOpt = '\0';
-		if(oOpt != 0) CPyParse::CopyPyStringToC(oOpt, sOpt, 1024);
+		char sOpt1[1024]; *sOpt1 = '\0';
+		char sOpt2[1024]; *sOpt2 = '\0';
+		if(oOpt1 != 0) CPyParse::CopyPyStringToC(oOpt1, sOpt1, 1024);
+		if(oOpt2 != 0) CPyParse::CopyPyStringToC(oOpt2, sOpt2, 1024);
 
 		double arRes[12];
 		int lenRes = 0;
-		g_pyParse.ProcRes(RadRlxAuto(arRes, &lenRes, ind, prec, numIt, meth, sOpt));
+		g_pyParse.ProcRes(RadRlxAuto(arRes, &lenRes, ind, prec, numIt, meth, sOpt1, sOpt2));
 
 		if(lenRes == 1) oResInd = Py_BuildValue("d", *arRes);
 		else if(lenRes > 1) oResInd = CPyParse::SetDataListOfLists(arRes, lenRes, 1);
-		
 	}
 	catch(const char* erText)
 	{
 		PyErr_SetString(PyExc_RuntimeError, erText);
-		//PyErr_PrintEx(1);
 	}
 	return oResInd;
 }
@@ -2359,27 +2357,27 @@ static PyObject* radia_RlxUpdSrc(PyObject* self, PyObject* args)
  ***************************************************************************/
 static PyObject* radia_Solve(PyObject* self, PyObject* args)
 {
-	PyObject *oRes=0;
+	PyObject *oOpt=0, *oRes=0;
 	try
 	{
-		int ind=0, numIt=1000, meth=4; //OC02112019
-		//int ind=0, numIt=1000, meth=0;
+		int ind=0, numIt=1000, meth=4;
 		double prec=0.0001;
 
-		if(!PyArg_ParseTuple(args, "idi|i:Solve", &ind, &prec, &numIt, &meth)) throw CombErStr(strEr_BadFuncArg, ": Solve");
+		if(!PyArg_ParseTuple(args, "idi|iO:Solve", &ind, &prec, &numIt, &meth, &oOpt)) throw CombErStr(strEr_BadFuncArg, ": Solve");
+
+		char sOpt[1024]; *sOpt = '\0';
+		if(oOpt != 0) CPyParse::CopyPyStringToC(oOpt, sOpt, 1024);
 
 		double arResSolve[12];
 		int lenResSolve = 4;
-		g_pyParse.ProcRes(RadSolve(arResSolve, &lenResSolve, ind, prec, numIt, meth));
+		g_pyParse.ProcRes(RadSolve(arResSolve, &lenResSolve, ind, prec, numIt, meth, sOpt));
 
 		if(lenResSolve == 1) oRes = Py_BuildValue("d", *arResSolve);
 		else if(lenResSolve > 1) oRes = CPyParse::SetDataListOfLists(arResSolve, lenResSolve, 1);
-		
 	}
 	catch(const char* erText)
 	{
 		PyErr_SetString(PyExc_RuntimeError, erText);
-		//PyErr_PrintEx(1);
 	}
 	return oRes;
 }
@@ -3296,7 +3294,7 @@ static PyMethodDef radia_methods[] = {
 	{"RlxMan", radia_RlxMan, METH_VARARGS, "RlxMan(intrc,meth,iternum,rlxpar) executes manual relaxation procedure for interaction matrix intrc using method number meth, by making iternum iterations with relaxation parameter value rlxpar."},
 	{"RlxAuto", radia_RlxAuto, METH_VARARGS, "RlxAuto(intrc,prec,maxiter,meth:4,'ZeroM->True|False') executes automatic relaxation procedure with the interaction matrix intrc using the method number meth. Relaxation stops whenever the change in magnetization (averaged over all sub-elements) between two successive iterations is smaller than prec or the number of iterations is larger than maxiter. The option value 'ZeroM->True' (default) starts the relaxation by setting the magnetization values in all paricipating objects to zero; 'ZeroM->False' starts the relaxation with the existing magnetization values in the sub-volumes."},
 	{"RlxUpdSrc", radia_RlxUpdSrc, METH_VARARGS, "RlxUpdSrc(intrc) updates external field data for the relaxation (to take into account e.g. modification of currents in coils, if any) without rebuilding the interaction matrix."},
-	{"Solve", radia_Solve, METH_VARARGS, "Solve(obj,prec,maxiter,meth:4) solves a magnetostatic problem, i.e. builds an interaction matrix for the object obj and performs a relaxation procedure using the method number meth (default is 4). The relaxation stops whenever the change in magnetization (averaged over all sub-elements) between two successive iterations is smaller than prec or the number of iterations is larger than maxiter."},
+	{"Solve", radia_Solve, METH_VARARGS, "Solve(obj,prec,maxiter,meth:4) solves a magnetostatic problem, i.e. builds an interaction matrix for the object obj and performs a relaxation procedure using the method number meth (default is 4, use 9 for CUDA-accelerated). The relaxation stops whenever the change in magnetization (averaged over all sub-elements) between two successive iterations is smaller than prec or the number of iterations is larger than maxiter."},
 
 	{"Fld", radia_Fld, METH_VARARGS,  "Fld(obj,'bx|by|bz|hx|hy|hz|ax|ay|az|mx|my|mz'|'',[x,y,z]|[[x1,y1,z1],[x2,y2,z2],...]) computes magnetic field created by the object obj in point(s) {x,y,z} ({x1,y1,z1},{x2,y2,z2},...). The field component is specified by the second input variable. The function accepts a list of 3D points of arbitrary nestness: in this case it returns the corresponding list of magnetic field values."},
 	{"FldLst", radia_FldLst, METH_VARARGS,  "FldLst(obj,'bx|by|bz|hx|hy|hz|ax|ay|az|mx|my|mz'|'',[x1,y1,z1],[x2,y2,z2],np,'arg|noarg':'noarg',strt:0.) computes magnetic field created by object obj in np equidistant points along a line segment from [x1,y1,z1] to [x2,y2,z2]; the field component is specified by the second input variable; the 'arg|noarg' string variable specifies whether to output a longitudinal position for each point where the field is computed, and strt gives the start-value for the longitudinal position."},

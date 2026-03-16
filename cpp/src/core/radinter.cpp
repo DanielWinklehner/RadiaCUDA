@@ -141,9 +141,9 @@ void ShowInteractVector(int, char*);
 void ManualRelax( int, int, int, double );
 //void AutoRelax( int, double, int, int );
 void AutoRelax();
-void AutoRelaxOpt( int, double, int, int, const char* );
+void AutoRelaxOpt( int, double, int, int, const char*, const char* Opt2="");
 void UpdateSourcesForRelax( int );
-void SolveGen( int, double, int, int );
+void SolveGen( int, double, int, int, const char* Opt1="");
 void ParticleTrajectory( int, double, double,double,double,double, double,double, int );
 void FocusingPotential( int, double,double,double, double,double,double, int );
 //void FocusingKickPer( int, double,double,double, double,double,double, double,int, double,double,double, double,int,double,int, const char*, int,int,double,double, const char*, double );
@@ -1470,13 +1470,13 @@ void AutoRelax()
 
 //-------------------------------------------------------------------------
 
-void AutoRelaxOpt(int InteractElemKey, double PrecOnMagnetiz, int MaxIterNumber, int MethNo, const char* Opt1)
+void AutoRelaxOpt(int InteractElemKey, double PrecOnMagnetiz, int MaxIterNumber, int MethNo, const char* Opt1, const char* Opt2)
 {
-	char CharBuf1[200];
-	const char* OptionNames[] = {CharBuf1};
-	const char* OptionValues[] = {0};
-	const char* NonParsedOpts[] = {Opt1};
-	int OptionCount = 1;
+	char CharBuf1[200], CharBuf2[200];
+	const char* OptionNames[] = {CharBuf1, CharBuf2};
+	const char* OptionValues[] = {0, 0};
+	const char* NonParsedOpts[] = {Opt1, Opt2};
+	int OptionCount = 2;
 	AuxParseOptionNamesAndValues(NonParsedOpts, OptionNames, OptionValues, OptionCount);
 
 	rad.MakeAutoRelax(InteractElemKey, PrecOnMagnetiz, MaxIterNumber, MethNo, OptionNames, OptionValues, OptionCount);
@@ -1491,10 +1491,10 @@ void UpdateSourcesForRelax(int InteractElemKey)
 
 //-------------------------------------------------------------------------
 
-void SolveGen(int ObjKey, double PrecOnMagnetiz, int MaxIterNumber, int MethNo)
+void SolveGen(int ObjKey, double PrecOnMagnetiz, int MaxIterNumber, int MethNo, const char* Opt1)
 {
 	if(MethNo == 0) MethNo = 4; //Default method
-	rad.SolveGen(ObjKey, PrecOnMagnetiz, MaxIterNumber, MethNo);
+	rad.SolveGen(ObjKey, PrecOnMagnetiz, MaxIterNumber, MethNo, Opt1);
 }
 
 //-------------------------------------------------------------------------

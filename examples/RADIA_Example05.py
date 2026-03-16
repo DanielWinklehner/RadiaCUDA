@@ -133,7 +133,7 @@ if __name__ == "__main__":
         print("OpenGL viewer not available, skipping 3D display")
 
     t1 = time.time()
-    res = rad.Solve(t, 0.0001, 100000)
+    res = rad.Solve(t, 0.0001, 1500, 4)
     t2 = time.time()
 
     print(res[0])
@@ -181,7 +181,7 @@ if __name__ == "__main__":
         print("OpenGL viewer not available, skipping 3D display")
 
     t1 = time.time()
-    res = rad.Solve(t, 0.0001, 1500)
+    res = rad.Solve(t, 0.0001, 1500, 4)
     t2 = time.time()
 
     b0 = rad.Fld(t, "Bz", [0, 0, 0])

@@ -86,6 +86,14 @@ typedef vector<radTRelaxSubInterval> radTVectRelaxSubInterval;
 
 class radTInteraction : public radTg {
 
+#ifdef RADIA_WITH_CUDA
+	friend int radGPU_PackInteractionData(radTInteraction*, struct RadGPURelaxData*);
+	friend void radGPU_UnpackMagnetization(struct RadGPURelaxData*, radTInteraction*);
+	friend int radGPU_AutoRelax(radTInteraction*, double, int, char, double);
+	friend int radGPU_PackGeometryForAsm(radTInteraction*, struct RadGPU_PolyData*, struct RadGPU_RecMagData*, struct RadGPU_SymData*);
+	friend void radGPU_UnpackMatrix(struct RadGPU_AsmResult*, radTInteraction*);
+#endif
+
 	int AmOfMainElem;
 	int AmOfExtElem;
 	radThg SourceHandle;

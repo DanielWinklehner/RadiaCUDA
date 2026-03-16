@@ -12,7 +12,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ---------- Options ----------
 option(RADIA_WITH_MPI  "Enable MPI support"  ON)
-option(RADIA_WITH_CUDA "Enable CUDA support" OFF)
+option(RADIA_WITH_CUDA "Enable CUDA support" ON)
 
 # ---------- Dependencies ----------
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)

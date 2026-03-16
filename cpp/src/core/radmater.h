@@ -550,6 +550,33 @@ public:
 		return FinishDuplication(pNewMater, hg);
 	}
 
+    	// ---- GPU data extraction (added for CUDA support) ----
+#ifdef RADIA_WITH_CUDA
+	void GetGPUData_Counts(int* outCurvePoints, int* outFormulaLen) const
+	{
+		*outCurvePoints = gLenArrayHM;
+		*outFormulaLen = (gLenArrayHM == 0) ? lenMs_ks : 0;
+	}
+	void GetGPUData_Curve(double* outH, double* outM, double* outDMDH, int maxPts) const
+	{
+		if(gArrayHM == 0 || gdMdH == 0 || gLenArrayHM <= 0) return;
+		int n = (maxPts < gLenArrayHM) ? maxPts : gLenArrayHM;
+		for(int i = 0; i < n; i++) {
+			outH[i] = gArrayHM[i].x;
+			outM[i] = gArrayHM[i].y;
+			outDMDH[i] = gdMdH[i];
+		}
+	}
+	void GetGPUData_Formula(double* outMs, double* outKs, int* outLen) const
+	{
+		*outLen = lenMs_ks;
+		for(int i = 0; i < 3; i++) {
+			outMs[i] = (i < lenMs_ks) ? Ms[i] : 0.0;
+			outKs[i] = (i < lenMs_ks) ? ks[i] : 0.0;
+		}
+	}
+#endif
+
 	int SizeOfThis() { return sizeof(radTNonlinearIsotropMaterial);}
 
 	void FindNewH_FromKsi(TVector3d& InstantH, const TMatrix3d& Matr, const TVector3d& H_Ext, double gInstKsi) 

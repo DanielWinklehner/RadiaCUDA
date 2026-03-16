@@ -7,6 +7,7 @@
  * @author O.Chubar
  * @version 1.0
  ***************************************************************************/
+#define PY_SSIZE_T_CLEAN   // Required since Python 3.10 - must go before #include "Python.h"
 
 #ifndef __PYPARSE_H
 #define __PYPARSE_H
