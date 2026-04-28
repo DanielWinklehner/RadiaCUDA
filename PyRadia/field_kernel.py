@@ -30,10 +30,10 @@ except ImportError:
     HAS_CUPY = False
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # CUDA Kernels — V2 architecture (one block per point,
 # threads split elements, Python-side symmetry loop)
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 _POLY_KERNEL_FP64 = r"""
 extern "C" __global__
@@ -95,9 +95,15 @@ void polyhedron_field_fp64(
             int e_start=edge_offsets[fi], e_end=edge_offsets[fi+1];
             int n_edges=e_end-e_start;
 
+            // OLD
+            //double Sx=0.0, Sy=0.0, Sz=0.0;
+            //double ArgSumAtans1=0.0, PiMultSumAtans1=0.0;
+            //double ArgSumLogs2=1.0;
+
+            // NEW
             double Sx=0.0, Sy=0.0, Sz=0.0;
-            double ArgSumAtans1=0.0, PiMultSumAtans1=0.0;
             double ArgSumLogs2=1.0;
+            //
 
             double x1=edge_pts_2d[e_start*2+0]-loc_x;
             double y1=edge_pts_2d[e_start*2+1]-loc_y;
@@ -153,6 +159,7 @@ void polyhedron_field_fp64(
                     double twob=2.0*b;
                     double kx1mb=k*x1-b, kx2mb=k*x2-b;
 
+                    /* OLD
                     double Arg1=-(ke2ze2pbe2*(bx1+kze2)*R1pbpkx1+kze2*twob*x1e2pze2);
                     double Arg2=(ke2ze2pbe2*kx1mb*R1pbpkx1+ke2ze2mbe2*x1e2pze2)*z;
                     double Arg3=ke2ze2pbe2*(bx2+kze2)*R2pbpkx2+kze2*twob*x2e2pze2;
@@ -178,6 +185,18 @@ void polyhedron_field_fp64(
                         ArgSumAtans1=0.0;
                     }
                     PiMultSumAtans1+=PiMult1+PiMult2;
+                    */
+
+                    // NEW
+                    double Arg1=-(ke2ze2pbe2*(bx1+kze2)*R1pbpkx1+kze2*twob*x1e2pze2);
+                    double Arg2=(ke2ze2pbe2*kx1mb*R1pbpkx1+ke2ze2mbe2*x1e2pze2)*z;
+                    double Arg3=ke2ze2pbe2*(bx2+kze2)*R2pbpkx2+kze2*twob*x2e2pze2;
+                    double Arg4=(ke2ze2pbe2*kx2mb*R2pbpkx2+ke2ze2mbe2*x2e2pze2)*z;
+
+                    double atanNum = Arg1*Arg4 + Arg3*Arg2;
+                    double atanDen = Arg2*Arg4 - Arg1*Arg3;
+                    Sz += atan2(atanNum, atanDen);
+                    //
 
                     double val1=bkpx1pke2x1/sqrtke2p1+R1;
                     double val2=bkpx2pke2x2/sqrtke2p1+R2;
@@ -203,7 +222,7 @@ void polyhedron_field_fp64(
                 x1=x2; y1=y2; x1e2=x2e2; y1e2=y2e2;
             }
 
-            Sz=atan(ArgSumAtans1)+PiMultSumAtans1*PI;
+            //Sz=atan(ArgSumAtans1)+PiMultSumAtans1*PI;
             if(ArgSumLogs2<=0.0) ArgSumLogs2=1.0e-50;
             Sx+=log(ArgSumLogs2);
 
@@ -234,6 +253,7 @@ void polyhedron_field_fp64(
     }
 }
 """
+
 
 _RECMAG_KERNEL_FP64 = r"""
 extern "C" __global__
@@ -441,10 +461,9 @@ def _build_symmetry_transforms(symmetries):
     return transforms
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # Main API
-# ═══════════════════════════════════════════════════════════════
-
+# ===============================================================
 def fld_gpu(geo, points, component='b', gpu_geo=None, symmetries=None,
             coil_obj=None):
     """Compute magnetic field on GPU.

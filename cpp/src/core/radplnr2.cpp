@@ -90,8 +90,12 @@ void radTPolygon::B_comp(radTField* FieldPtr)
 
 	int AmOfEdgePoints_mi_1 = AmOfEdgePoints - 1;
 
+//	double Sx=0., Sy=0., Sz=0., AS=0.;
+//	double ArgSumAtans1=0., PiMultSumAtans1=0.;
+//	double ArgSumLogs2=1.;
+
 	double Sx=0., Sy=0., Sz=0., AS=0.;
-	double ArgSumAtans1=0., PiMultSumAtans1=0.;
+	double SumAtanAngles=0.;
 	double ArgSumLogs2=1.;
 
 	for(int i=0; i<AmOfEdgePoints; i++)
@@ -194,113 +198,125 @@ void radTPolygon::B_comp(radTField* FieldPtr)
 			if((R1pbpkx1 < AbsRandR1) && (R1 > 100.*AbsRandR1) && ((x1e2 + ze2) < bpkx1e2*MaxRelTolToSwitch)) R1pbpkx1 = 0.5*(x1e2 + ze2)/Abs(bpkx1); //OC170504
 			if((R2pbpkx2 < AbsRandR2) && (R2 > 100.*AbsRandR2) && ((x2e2 + ze2) < bpkx2e2*MaxRelTolToSwitch)) R2pbpkx2 = 0.5*(x2e2 + ze2)/Abs(bpkx2); //OC170504
 
-			double FlpRep1ForSumAtans1 = 0.;
+//			double FlpRep1ForSumAtans1 = 0.;
+//
+//			double four_be2ke2 = 4.*be2*ke2;
+//			double four_be2be2ke2 = be2*four_be2ke2;
+//			double be2mke2ze2 = be2-ke2ze2, be2pke2ze2 = be2+ke2ze2;
+//			double be2mke2ze2e2 = be2mke2ze2*be2mke2ze2, be2pke2ze2e2 = be2pke2ze2*be2pke2ze2;
+//			double DFlipRepSumAtans1 = (be2+ke2p1*ze2)*(four_be2ke2*(be2+ke2ze2)-be2mke2ze2e2);
+//			double BufDen = four_be2be2ke2-ke2p1*be2mke2ze2e2;
+//
+//			if((DFlipRepSumAtans1 >= 0.) && (BufDen != 0.))
+//			{
+//				double Buf1Num = bk*be2pke2ze2e2;
+//				double Buf2Num = be2mke2ze2*sqrt(DFlipRepSumAtans1);
+//				double xFlp1 = (Buf1Num - Buf2Num)/BufDen;
+//				double xFlp2 = (Buf1Num + Buf2Num)/BufDen;
+//
+//				double xFlp = xFlp1;
+//				if((x1<x2)? ((xFlp>x1) && (xFlp<x2)) : ((xFlp<x1) && (xFlp>x2)))
+//				{
+//					double xFlpe2 = xFlp*xFlp, kxFlp = k*xFlp;
+//					double kxFlppb = kxFlp+b, kxFlpmb = kxFlp-b;
+//					double kxFlppbe2 = kxFlppb*kxFlppb;
+//					double SqRoot = sqrt(xFlpe2+kxFlppbe2+ze2);
+//
+//					if(Sign((xFlpe2+ze2)*(-be2mke2ze2) + (-be2+ke2*xFlpe2)*be2pke2ze2) == Sign(-kxFlpmb)) // RootIsReal?
+//					{
+//						double DenomDerivSign = Sign(-2.*xFlp*be2mke2ze2 + kxFlpmb*be2pke2ze2*(k+(bk+ke2p1*xFlp)/SqRoot) + k*be2pke2ze2*(kxFlppb + SqRoot));
+//						//double DenomDerivSign = Sign(-2.*xFlp*be2mke2ze2*SqRoot + kxFlpmb*be2pke2ze2*(k*SqRoot + (bk+ke2p1*xFlp)) + k*be2pke2ze2*(kxFlppb + SqRoot)*SqRoot); //OC040504
+//
+//						double NumSign = Sign((2.*bk*ze2*(xFlpe2+ze2) + (b*xFlp+kze2)*be2pke2ze2*(kxFlppb + SqRoot))/z);
+//						//double NumSign = Sign((2.*bk*ze2*(xFlpe2+ze2) + (b*xFlp+kze2)*be2pke2ze2*(kxFlppb + SqRoot))*z); //OC040504
+//						double Buf = -DenomDerivSign*NumSign*Sign(x2mx1);
+//
+//						FlpRep1ForSumAtans1 += Buf;
+//					}
+//				}
+//				xFlp = xFlp2;
+//				if((x1<x2)? ((xFlp>x1) && (xFlp<x2)) : ((xFlp<x1) && (xFlp>x2)))
+//				{
+//					double xFlpe2 = xFlp*xFlp, kxFlp = k*xFlp;
+//					double kxFlppb = kxFlp+b, kxFlpmb = kxFlp-b;
+//					double kxFlppbe2 = kxFlppb*kxFlppb;
+//					double SqRoot = sqrt(xFlpe2+kxFlppbe2+ze2);
+//					if(Sign((xFlpe2+ze2)*(-be2mke2ze2) + (-be2+ke2*xFlpe2)*be2pke2ze2) == Sign(-kxFlpmb))
+//					{
+//						double DenomDerivSign = Sign(-2.*xFlp*be2mke2ze2 + kxFlpmb*be2pke2ze2*(k+(bk+ke2p1*xFlp)/SqRoot) + k*be2pke2ze2*(kxFlppb + SqRoot));
+//						//double DenomDerivSign = Sign(-2.*xFlp*be2mke2ze2*SqRoot + kxFlpmb*be2pke2ze2*(k*SqRoot + (bk+ke2p1*xFlp)) + k*be2pke2ze2*(kxFlppb + SqRoot)*SqRoot); //OC040504
+//
+//						double NumSign = Sign((2.*bk*ze2*(xFlpe2+ze2) + (b*xFlp+kze2)*be2pke2ze2*(kxFlppb + SqRoot))/z);
+//						//double NumSign = Sign((2.*bk*ze2*(xFlpe2+ze2) + (b*xFlp+kze2)*be2pke2ze2*(kxFlppb + SqRoot))*z);
+//						double Buf = -DenomDerivSign*NumSign*Sign(x2mx1);
+//
+//						FlpRep1ForSumAtans1 += Buf;
+//					}
+//				}
+//			}
+//
+//			double Arg1ForSumAtans1 = -(ke2ze2pbe2*(bx1 + kze2)*R1pbpkx1 + kze2*twob*x1e2pze2);
+//			double Arg2ForSumAtans1 = (ke2ze2pbe2*kx1mb*R1pbpkx1 + ke2ze2mbe2*x1e2pze2)*z;
+//			double Arg3ForSumAtans1 = ke2ze2pbe2*(bx2 + kze2)*R2pbpkx2 + kze2*twob*x2e2pze2;
+//			double Arg4ForSumAtans1 = (ke2ze2pbe2*kx2mb*R2pbpkx2 + ke2ze2mbe2*x2e2pze2)*z;
+//
+//			//OC18122019
+//			if(Arg2ForSumAtans1 == 0.) Arg2ForSumAtans1 = 1.e-50; //?
+//			if(Arg4ForSumAtans1 == 0.) Arg4ForSumAtans1 = 1.e-50; //?
+//
+//			double PiMult1=0., PiMult2=0.;
+//			double CurArgSumAtans1 = TransAtans(Arg1ForSumAtans1/Arg2ForSumAtans1, Arg3ForSumAtans1/Arg4ForSumAtans1, PiMult1);
+//
+//			//double DivVal = Arg2ForSumAtans1*Arg4ForSumAtans1 - Arg1ForSumAtans1*Arg3ForSumAtans1; //OC040504
+//            //if(DivVal == 0.) DivVal = 1.e-50; //OC040504
+//			//double CurArgSumAtans1 = (Arg1ForSumAtans1*Arg4ForSumAtans1 + Arg3ForSumAtans1*Arg2ForSumAtans1)/DivVal; //OC040504
+//			//if(Arg2ForSumAtans1*Arg4ForSumAtans1 != 0.) //OC040504
+//			//{
+//			//	double x = Arg1ForSumAtans1/Arg2ForSumAtans1, y = Arg3ForSumAtans1/Arg4ForSumAtans1;
+//            //  double Buf = 1.-x*y;
+//            //             PiMult1 = (((Buf > 0)? 0.:1.) * ((x < 0)? -1.:1.));
+//			//}
+//			//else //OC040504
+//			//{
+//			//	if(Arg1ForSumAtans1*Arg3ForSumAtans1 < 0)
+//			//	{
+//			//		PiMult1 = 0;
+//			//	}
+//			//	else
+//			//	{
+//			//      if(Arg2ForSumAtans1 < 0.)
+//			//		{
+//			//			if(Arg1ForSumAtans1 > 0.)
+//			//			{
+//			//                         PiMult1 = -1;
+//			//			}
+//			//			else PiMult1 = 1;
+//			//		}
+//			//		else
+//			//		{
+//			//			if(Arg1ForSumAtans1 > 0.)
+//			//			{
+//			//                         PiMult1 = 1;
+//			//			}
+//			//			else PiMult1 = -1;
+//			//		}
+//			//	}
+//			//}
+//
+//			ArgSumAtans1 = TransAtans(ArgSumAtans1, CurArgSumAtans1, PiMult2);
+//			PiMultSumAtans1 += PiMult1+PiMult2 + FlpRep1ForSumAtans1;
 
-			double four_be2ke2 = 4.*be2*ke2; 
-			double four_be2be2ke2 = be2*four_be2ke2;
-			double be2mke2ze2 = be2-ke2ze2, be2pke2ze2 = be2+ke2ze2;
-			double be2mke2ze2e2 = be2mke2ze2*be2mke2ze2, be2pke2ze2e2 = be2pke2ze2*be2pke2ze2;
-			double DFlipRepSumAtans1 = (be2+ke2p1*ze2)*(four_be2ke2*(be2+ke2ze2)-be2mke2ze2e2);
-			double BufDen = four_be2be2ke2-ke2p1*be2mke2ze2e2;
-
-			if((DFlipRepSumAtans1 >= 0.) && (BufDen != 0.))
-			{
-				double Buf1Num = bk*be2pke2ze2e2;
-				double Buf2Num = be2mke2ze2*sqrt(DFlipRepSumAtans1);
-				double xFlp1 = (Buf1Num - Buf2Num)/BufDen;
-				double xFlp2 = (Buf1Num + Buf2Num)/BufDen;
-
-				double xFlp = xFlp1;
-				if((x1<x2)? ((xFlp>x1) && (xFlp<x2)) : ((xFlp<x1) && (xFlp>x2)))
-				{
-					double xFlpe2 = xFlp*xFlp, kxFlp = k*xFlp;
-					double kxFlppb = kxFlp+b, kxFlpmb = kxFlp-b;
-					double kxFlppbe2 = kxFlppb*kxFlppb;
-					double SqRoot = sqrt(xFlpe2+kxFlppbe2+ze2);
-
-					if(Sign((xFlpe2+ze2)*(-be2mke2ze2) + (-be2+ke2*xFlpe2)*be2pke2ze2) == Sign(-kxFlpmb)) // RootIsReal?
-					{
-						double DenomDerivSign = Sign(-2.*xFlp*be2mke2ze2 + kxFlpmb*be2pke2ze2*(k+(bk+ke2p1*xFlp)/SqRoot) + k*be2pke2ze2*(kxFlppb + SqRoot));
-						//double DenomDerivSign = Sign(-2.*xFlp*be2mke2ze2*SqRoot + kxFlpmb*be2pke2ze2*(k*SqRoot + (bk+ke2p1*xFlp)) + k*be2pke2ze2*(kxFlppb + SqRoot)*SqRoot); //OC040504
-						
-						double NumSign = Sign((2.*bk*ze2*(xFlpe2+ze2) + (b*xFlp+kze2)*be2pke2ze2*(kxFlppb + SqRoot))/z);
-						//double NumSign = Sign((2.*bk*ze2*(xFlpe2+ze2) + (b*xFlp+kze2)*be2pke2ze2*(kxFlppb + SqRoot))*z); //OC040504
-						double Buf = -DenomDerivSign*NumSign*Sign(x2mx1);
-
-						FlpRep1ForSumAtans1 += Buf;
-					}
-				}
-				xFlp = xFlp2;
-				if((x1<x2)? ((xFlp>x1) && (xFlp<x2)) : ((xFlp<x1) && (xFlp>x2)))
-				{
-					double xFlpe2 = xFlp*xFlp, kxFlp = k*xFlp;
-					double kxFlppb = kxFlp+b, kxFlpmb = kxFlp-b;
-					double kxFlppbe2 = kxFlppb*kxFlppb;
-					double SqRoot = sqrt(xFlpe2+kxFlppbe2+ze2);
-					if(Sign((xFlpe2+ze2)*(-be2mke2ze2) + (-be2+ke2*xFlpe2)*be2pke2ze2) == Sign(-kxFlpmb))
-					{
-						double DenomDerivSign = Sign(-2.*xFlp*be2mke2ze2 + kxFlpmb*be2pke2ze2*(k+(bk+ke2p1*xFlp)/SqRoot) + k*be2pke2ze2*(kxFlppb + SqRoot));
-						//double DenomDerivSign = Sign(-2.*xFlp*be2mke2ze2*SqRoot + kxFlpmb*be2pke2ze2*(k*SqRoot + (bk+ke2p1*xFlp)) + k*be2pke2ze2*(kxFlppb + SqRoot)*SqRoot); //OC040504
-
-						double NumSign = Sign((2.*bk*ze2*(xFlpe2+ze2) + (b*xFlp+kze2)*be2pke2ze2*(kxFlppb + SqRoot))/z);
-						//double NumSign = Sign((2.*bk*ze2*(xFlpe2+ze2) + (b*xFlp+kze2)*be2pke2ze2*(kxFlppb + SqRoot))*z);
-						double Buf = -DenomDerivSign*NumSign*Sign(x2mx1);
-
-						FlpRep1ForSumAtans1 += Buf;
-					}
-				}
-			}
-
-			double Arg1ForSumAtans1 = -(ke2ze2pbe2*(bx1 + kze2)*R1pbpkx1 + kze2*twob*x1e2pze2);
+            // New 4/28/2026
+            double Arg1ForSumAtans1 = -(ke2ze2pbe2*(bx1 + kze2)*R1pbpkx1 + kze2*twob*x1e2pze2);
 			double Arg2ForSumAtans1 = (ke2ze2pbe2*kx1mb*R1pbpkx1 + ke2ze2mbe2*x1e2pze2)*z;
 			double Arg3ForSumAtans1 = ke2ze2pbe2*(bx2 + kze2)*R2pbpkx2 + kze2*twob*x2e2pze2;
 			double Arg4ForSumAtans1 = (ke2ze2pbe2*kx2mb*R2pbpkx2 + ke2ze2mbe2*x2e2pze2)*z;
 
-			//OC18122019
-			if(Arg2ForSumAtans1 == 0.) Arg2ForSumAtans1 = 1.e-50; //?
-			if(Arg4ForSumAtans1 == 0.) Arg4ForSumAtans1 = 1.e-50; //?
-
-			double PiMult1=0., PiMult2=0.;
-			double CurArgSumAtans1 = TransAtans(Arg1ForSumAtans1/Arg2ForSumAtans1, Arg3ForSumAtans1/Arg4ForSumAtans1, PiMult1);
-
-			//double DivVal = Arg2ForSumAtans1*Arg4ForSumAtans1 - Arg1ForSumAtans1*Arg3ForSumAtans1; //OC040504
-            //if(DivVal == 0.) DivVal = 1.e-50; //OC040504
-			//double CurArgSumAtans1 = (Arg1ForSumAtans1*Arg4ForSumAtans1 + Arg3ForSumAtans1*Arg2ForSumAtans1)/DivVal; //OC040504
-			//if(Arg2ForSumAtans1*Arg4ForSumAtans1 != 0.) //OC040504
-			//{
-			//	double x = Arg1ForSumAtans1/Arg2ForSumAtans1, y = Arg3ForSumAtans1/Arg4ForSumAtans1;
-            //  double Buf = 1.-x*y;
-            //             PiMult1 = (((Buf > 0)? 0.:1.) * ((x < 0)? -1.:1.));
-			//}
-			//else //OC040504
-			//{
-			//	if(Arg1ForSumAtans1*Arg3ForSumAtans1 < 0)
-			//	{
-			//		PiMult1 = 0;
-			//	}
-			//	else
-			//	{
-			//      if(Arg2ForSumAtans1 < 0.)
-			//		{
-			//			if(Arg1ForSumAtans1 > 0.)
-			//			{
-			//                         PiMult1 = -1;
-			//			}
-			//			else PiMult1 = 1;
-			//		}
-			//		else
-			//		{
-			//			if(Arg1ForSumAtans1 > 0.)
-			//			{
-			//                         PiMult1 = 1;
-			//			}
-			//			else PiMult1 = -1;
-			//		}
-			//	}
-			//}
-
-			ArgSumAtans1 = TransAtans(ArgSumAtans1, CurArgSumAtans1, PiMult2);
-			PiMultSumAtans1 += PiMult1+PiMult2 + FlpRep1ForSumAtans1;
+			// Direct angle accumulation — no TransAtans, no flip repair
+			double atanNum = Arg1ForSumAtans1*Arg4ForSumAtans1 + Arg3ForSumAtans1*Arg2ForSumAtans1;
+			double atanDen = Arg2ForSumAtans1*Arg4ForSumAtans1 - Arg1ForSumAtans1*Arg3ForSumAtans1;
+			SumAtanAngles += atan2(atanNum, atanDen);
+            // End New
 
 			double bkpx1pke2x1dsqrtke2p1pR1 = bkpx1pke2x1/sqrtke2p1 + R1; // sqrtke2p1 > 0 always
 			double bkpx2pke2x2dsqrtke2p1pR2 = bkpx2pke2x2/sqrtke2p1 + R2; // sqrtke2p1 > 0 always
@@ -340,7 +356,9 @@ void radTPolygon::B_comp(radTField* FieldPtr)
 
 	FieldPtr->PointIsInsideFrame = (z > 0.);
 
-	Sz = atan(ArgSumAtans1) + PiMultSumAtans1*PI;
+//	Sz = atan(ArgSumAtans1) + PiMultSumAtans1*PI;
+	Sz = SumAtanAngles;
+
 	if(B_orH_CompNeeded)
 	{
 		if(ArgSumLogs2 <= 0.) ArgSumLogs2 = 1.e-50; //OC040504
