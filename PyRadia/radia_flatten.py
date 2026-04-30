@@ -390,4 +390,5 @@ def validate(obj_id, geo, n_test_points=10, tol=1e-6):
 
     print(f"  Max relative error: {max_err:.2e}")
     print(f"  {'PASS' if all_pass else 'FAIL'}")
+
     return all_pass

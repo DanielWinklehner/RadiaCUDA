@@ -243,69 +243,138 @@ int radGPU_PackGeometryForAsm(
     // Build all symmetry copies from the transform list of element 0
     // In Radia, all elements in an interaction share the same symmetry structure
     // TransPtrVect is populated by FillInTransPtrVectForElem
+//    memset(symData, 0, sizeof(RadGPU_SymData));
+//
+//    // Use intrct's own method to enumerate symmetry copies for element 0
+//    intrct->FillInTransPtrVectForElem(0, 'I');
+//    int nCopies = (int)intrct->TransPtrVect.size();
+//
+//    if(nCopies > RADGPU_MAX_SYM_COPIES) {
+//        fprintf(stderr, "GPU asm: too many symmetry copies (%d > %d)\n", nCopies, RADGPU_MAX_SYM_COPIES);
+//        intrct->EmptyTransPtrVect();
+//        return 0;
+//    }
+//
+//    symData->n_copies = nCopies;
+//
+//    // For field transforms: we need to know how the field transforms under each symmetry.
+//    // In the CPU code, TransPtrVect[i]->TrMatrix(SubMatrix) does the field transform.
+//    // And TransPtrVect[i]->TrPoint_inv(obs) does the point inverse transform.
+//    // For the GPU:
+//    //   point_transform: maps obs point from lab to this copy's frame (TrPoint_inv)
+//    //   field_transform: maps the computed field back to lab frame (TrMatrix)
+//
+//    for(int sc = 0; sc < nCopies; sc++) {
+//        radTrans* trPtr = intrct->TransPtrVect[sc];
+//        double* pt = &symData->point_transforms[sc * 9];
+//        double* ft = &symData->field_transforms[sc * 9];
+//
+//        // Extract point inverse transform matrix
+//        // TrPoint_inv(P) applies the inverse rotation
+//        // We extract by transforming unit vectors
+//        TVector3d zero(0,0,0);
+//        TVector3d o = trPtr->TrPoint_inv(zero);
+//        TVector3d ex(1,0,0), ey(0,1,0), ez(0,0,1);
+//        TVector3d tx = trPtr->TrPoint_inv(ex) - o;
+//        TVector3d ty = trPtr->TrPoint_inv(ey) - o;
+//        TVector3d tz = trPtr->TrPoint_inv(ez) - o;
+//
+//        // Point transform: column-major storage as row-major 3x3
+//        // P_transformed = M * P, so row i = how unit vector maps
+//        pt[0] = tx.x; pt[1] = ty.x; pt[2] = tz.x;
+//        pt[3] = tx.y; pt[4] = ty.y; pt[5] = tz.y;
+//        pt[6] = tx.z; pt[7] = ty.z; pt[8] = tz.z;
+//
+//        // Extract field transform matrix
+//        // TrMatrix(M) transforms a 3x3 matrix: result = R * M * R^T
+//        // For a vector field: B_lab = R * B_local
+//        // Extract R by transforming unit matrices
+//        TMatrix3d unitX(TVector3d(1,0,0), TVector3d(0,0,0), TVector3d(0,0,0));
+//        TMatrix3d unitY(TVector3d(0,0,0), TVector3d(0,1,0), TVector3d(0,0,0));
+//        TMatrix3d unitZ(TVector3d(0,0,0), TVector3d(0,0,0), TVector3d(0,0,1));
+//
+//        // Actually, TrVectField gives us what we need directly:
+//        TVector3d fx = trPtr->TrVectField(ex);
+//        TVector3d fy = trPtr->TrVectField(ey);
+//        TVector3d fz = trPtr->TrVectField(ez);
+//
+//        ft[0] = fx.x; ft[1] = fy.x; ft[2] = fz.x;
+//        ft[3] = fx.y; ft[4] = fy.y; ft[5] = fz.y;
+//        ft[6] = fx.z; ft[7] = fy.z; ft[8] = fz.z;
+//    }
+//
+//    intrct->EmptyTransPtrVect();
+//    fprintf(stderr, "GPU asm pack: %d symmetry copies\n", nCopies);
+
+      // --- Per-element symmetry transforms ---
     memset(symData, 0, sizeof(RadGPU_SymData));
+    symData->n_elem = N;
 
-    // Use intrct's own method to enumerate symmetry copies for element 0
-    intrct->FillInTransPtrVectForElem(0, 'I');
-    int nCopies = (int)intrct->TransPtrVect.size();
-
-    if(nCopies > RADGPU_MAX_SYM_COPIES) {
-        fprintf(stderr, "GPU asm: too many symmetry copies (%d > %d)\n", nCopies, RADGPU_MAX_SYM_COPIES);
+    // First pass: count total copies
+    int totalCopies = 0;
+    std::vector<int> counts(N);
+    for(int j = 0; j < N; j++)
+    {
+        intrct->TransPtrVect.clear();
+        intrct->FillInTransPtrVectForElem(j, 'I');
+        counts[j] = (int)intrct->TransPtrVect.size();
+        totalCopies += counts[j];
         intrct->EmptyTransPtrVect();
-        return 0;
     }
 
-    symData->n_copies = nCopies;
+    symData->total_copies = totalCopies;
+    symData->sym_counts = new int[N];
+    symData->sym_offsets = new int[N + 1];
+    symData->point_transforms = new double[totalCopies * 9];
+    symData->field_transforms = new double[totalCopies * 9];
 
-    // For field transforms: we need to know how the field transforms under each symmetry.
-    // In the CPU code, TransPtrVect[i]->TrMatrix(SubMatrix) does the field transform.
-    // And TransPtrVect[i]->TrPoint_inv(obs) does the point inverse transform.
-    // For the GPU:
-    //   point_transform: maps obs point from lab to this copy's frame (TrPoint_inv)
-    //   field_transform: maps the computed field back to lab frame (TrMatrix)
-
-    for(int sc = 0; sc < nCopies; sc++) {
-        radTrans* trPtr = intrct->TransPtrVect[sc];
-        double* pt = &symData->point_transforms[sc * 9];
-        double* ft = &symData->field_transforms[sc * 9];
-
-        // Extract point inverse transform matrix
-        // TrPoint_inv(P) applies the inverse rotation
-        // We extract by transforming unit vectors
-        TVector3d zero(0,0,0);
-        TVector3d o = trPtr->TrPoint_inv(zero);
-        TVector3d ex(1,0,0), ey(0,1,0), ez(0,0,1);
-        TVector3d tx = trPtr->TrPoint_inv(ex) - o;
-        TVector3d ty = trPtr->TrPoint_inv(ey) - o;
-        TVector3d tz = trPtr->TrPoint_inv(ez) - o;
-
-        // Point transform: column-major storage as row-major 3x3
-        // P_transformed = M * P, so row i = how unit vector maps
-        pt[0] = tx.x; pt[1] = ty.x; pt[2] = tz.x;
-        pt[3] = tx.y; pt[4] = ty.y; pt[5] = tz.y;
-        pt[6] = tx.z; pt[7] = ty.z; pt[8] = tz.z;
-
-        // Extract field transform matrix
-        // TrMatrix(M) transforms a 3x3 matrix: result = R * M * R^T
-        // For a vector field: B_lab = R * B_local
-        // Extract R by transforming unit matrices
-        TMatrix3d unitX(TVector3d(1,0,0), TVector3d(0,0,0), TVector3d(0,0,0));
-        TMatrix3d unitY(TVector3d(0,0,0), TVector3d(0,1,0), TVector3d(0,0,0));
-        TMatrix3d unitZ(TVector3d(0,0,0), TVector3d(0,0,0), TVector3d(0,0,1));
-
-        // Actually, TrVectField gives us what we need directly:
-        TVector3d fx = trPtr->TrVectField(ex);
-        TVector3d fy = trPtr->TrVectField(ey);
-        TVector3d fz = trPtr->TrVectField(ez);
-
-        ft[0] = fx.x; ft[1] = fy.x; ft[2] = fz.x;
-        ft[3] = fx.y; ft[4] = fy.y; ft[5] = fz.y;
-        ft[6] = fx.z; ft[7] = fy.z; ft[8] = fz.z;
+    // Build offsets
+    symData->sym_offsets[0] = 0;
+    for(int j = 0; j < N; j++)
+    {
+        symData->sym_counts[j] = counts[j];
+        symData->sym_offsets[j + 1] = symData->sym_offsets[j] + counts[j];
     }
 
-    intrct->EmptyTransPtrVect();
+    // Second pass: extract transforms
+    for(int j = 0; j < N; j++)
+    {
+        intrct->TransPtrVect.clear();
+        intrct->FillInTransPtrVectForElem(j, 'I');
 
-    fprintf(stderr, "GPU asm pack: %d symmetry copies\n", nCopies);
+        int offset = symData->sym_offsets[j];
+        for(int sc = 0; sc < counts[j]; sc++)
+        {
+            radTrans* trPtr = intrct->TransPtrVect[sc];
+            double* pt = &symData->point_transforms[(offset + sc) * 9];
+            double* ft = &symData->field_transforms[(offset + sc) * 9];
+
+            // Point inverse transform matrix
+            TVector3d zero(0,0,0);
+            TVector3d o = trPtr->TrPoint_inv(zero);
+            TVector3d ex(1,0,0), ey(0,1,0), ez(0,0,1);
+            TVector3d tx = trPtr->TrPoint_inv(ex) - o;
+            TVector3d ty = trPtr->TrPoint_inv(ey) - o;
+            TVector3d tz = trPtr->TrPoint_inv(ez) - o;
+
+            pt[0] = tx.x; pt[1] = ty.x; pt[2] = tz.x;
+            pt[3] = tx.y; pt[4] = ty.y; pt[5] = tz.y;
+            pt[6] = tx.z; pt[7] = ty.z; pt[8] = tz.z;
+
+            // Field transform via TrVectField
+            TVector3d fx = trPtr->TrVectField(ex);
+            TVector3d fy = trPtr->TrVectField(ey);
+            TVector3d fz = trPtr->TrVectField(ez);
+
+            ft[0] = fx.x; ft[1] = fy.x; ft[2] = fz.x;
+            ft[3] = fx.y; ft[4] = fy.y; ft[5] = fz.y;
+            ft[6] = fx.z; ft[7] = fy.z; ft[8] = fz.z;
+        }
+
+        intrct->EmptyTransPtrVect();
+    }
+
+    fprintf(stderr, "GPU asm pack: %d elements, %d total symmetry copies\n", N, totalCopies);
 
     return 1;
 }
@@ -332,6 +401,16 @@ void radGPU_UnpackMatrix(
             m.Str1.x = blocks[idx+3]; m.Str1.y = blocks[idx+4]; m.Str1.z = blocks[idx+5];
             m.Str2.x = blocks[idx+6]; m.Str2.y = blocks[idx+7]; m.Str2.z = blocks[idx+8];
         }
+    }
+}
+
+void radGPU_FreeSymData(RadGPU_SymData* symData)
+{
+    if(symData) {
+        delete[] symData->sym_counts;   symData->sym_counts = nullptr;
+        delete[] symData->sym_offsets;   symData->sym_offsets = nullptr;
+        delete[] symData->point_transforms; symData->point_transforms = nullptr;
+        delete[] symData->field_transforms; symData->field_transforms = nullptr;
     }
 }
 

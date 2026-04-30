@@ -260,9 +260,14 @@ __global__ void assemble_poly_kernel(
     const double* __restrict__ face_rot,        // [n_faces_total*9] lab->local rotation
     const double* __restrict__ face_orig,       // [n_faces_total*3] face origin in lab
     const double* __restrict__ edge_pts_2d,     // [n_edges_total*2]
-    int n_sym,
-    const double* __restrict__ sym_point_tr,    // [n_sym*9]
-    const double* __restrict__ sym_field_tr,    // [n_sym*9]
+    //int n_sym,
+    //const double* __restrict__ sym_point_tr,    // [n_sym*9]
+    //const double* __restrict__ sym_field_tr,    // [n_sym*9]
+    const int* __restrict__ sym_counts,
+    const int* __restrict__ sym_offsets,
+    const double* __restrict__ sym_point_tr,
+    const double* __restrict__ sym_field_tr,
+
     float* __restrict__ out_blocks              // [N*N*9]
 )
 {
@@ -289,10 +294,18 @@ __global__ void assemble_poly_kernel(
     int fStart = face_offsets[src_idx];
     int fEnd   = face_offsets[src_idx + 1];
 
-    for(int sc = 0; sc < n_sym; sc++)
+//     for(int sc = 0; sc < n_sym; sc++)
+//     {
+//         const double* ptMat = &sym_point_tr[sc * 9];  // maps obs into this copy's frame
+//         const double* ftMat = &sym_field_tr[sc * 9];   // maps field back to lab
+
+    int n_sym_j = sym_counts[src_idx];
+    int sym_off = sym_offsets[src_idx];
+
+    for(int sc = 0; sc < n_sym_j; sc++)
     {
-        const double* ptMat = &sym_point_tr[sc * 9];  // maps obs into this copy's frame
-        const double* ftMat = &sym_field_tr[sc * 9];   // maps field back to lab
+        const double* ptMat = &sym_point_tr[(sym_off + sc) * 9];
+        const double* ftMat = &sym_field_tr[(sym_off + sc) * 9];
 
         // Transform observation point: obs_copy = ptMat * obs_lab
         double obs_copy[3] = {
@@ -432,12 +445,17 @@ int radGPU_AssembleMatrix(
         // Upload poly data to GPU
         double *d_obs, *d_centers, *d_face_cz, *d_face_rot, *d_face_orig, *d_edge_pts;
         int *d_face_offsets, *d_edge_offsets;
-        double *d_sym_pt, *d_sym_ft;
+//         double *d_sym_pt, *d_sym_ft;
         float *d_out;
 
         int nFaces = polyData->n_faces_total;
         int nEdges = polyData->n_edges_total;
-        int nSym = symData->n_copies;
+//         int nSym = symData->n_copies;
+
+        int *d_sym_counts, *d_sym_offsets;
+        double *d_sym_pt, *d_sym_ft;
+
+        int totalCopies = symData->total_copies;
 
         cudaMalloc(&d_obs,          3*N*sizeof(double));
         cudaMalloc(&d_centers,      3*N*sizeof(double));
@@ -447,9 +465,14 @@ int radGPU_AssembleMatrix(
         cudaMalloc(&d_face_rot,    9*nFaces*sizeof(double));
         cudaMalloc(&d_face_orig,   3*nFaces*sizeof(double));
         cudaMalloc(&d_edge_pts,    2*nEdges*sizeof(double));
-        cudaMalloc(&d_sym_pt,      nSym*9*sizeof(double));
-        cudaMalloc(&d_sym_ft,      nSym*9*sizeof(double));
+//         cudaMalloc(&d_sym_pt,      nSym*9*sizeof(double));
+//         cudaMalloc(&d_sym_ft,      nSym*9*sizeof(double));
         cudaMalloc(&d_out,         totalPairs*9*sizeof(float));
+
+        cudaMalloc(&d_sym_counts,  N * sizeof(int));
+        cudaMalloc(&d_sym_offsets, (N+1) * sizeof(int));
+        cudaMalloc(&d_sym_pt,     totalCopies * 9 * sizeof(double));
+        cudaMalloc(&d_sym_ft,     totalCopies * 9 * sizeof(double));
 
         cudaMemcpy(d_obs,          polyData->centers,      3*N*sizeof(double),         cudaMemcpyHostToDevice);
         cudaMemcpy(d_centers,      polyData->centers,      3*N*sizeof(double),         cudaMemcpyHostToDevice);
@@ -459,17 +482,29 @@ int radGPU_AssembleMatrix(
         cudaMemcpy(d_face_rot,    polyData->face_rot,      9*nFaces*sizeof(double),    cudaMemcpyHostToDevice);
         cudaMemcpy(d_face_orig,   polyData->face_orig,     3*nFaces*sizeof(double),    cudaMemcpyHostToDevice);
         cudaMemcpy(d_edge_pts,    polyData->edge_pts_2d,   2*nEdges*sizeof(double),    cudaMemcpyHostToDevice);
-        cudaMemcpy(d_sym_pt,      symData->point_transforms, nSym*9*sizeof(double),    cudaMemcpyHostToDevice);
-        cudaMemcpy(d_sym_ft,      symData->field_transforms, nSym*9*sizeof(double),    cudaMemcpyHostToDevice);
+//         cudaMemcpy(d_sym_pt,      symData->point_transforms, nSym*9*sizeof(double),    cudaMemcpyHostToDevice);
+//         cudaMemcpy(d_sym_ft,      symData->field_transforms, nSym*9*sizeof(double),    cudaMemcpyHostToDevice);
+
+        cudaMemcpy(d_sym_counts,  symData->sym_counts,        N * sizeof(int),                cudaMemcpyHostToDevice);
+        cudaMemcpy(d_sym_offsets, symData->sym_offsets,        (N+1) * sizeof(int),            cudaMemcpyHostToDevice);
+        cudaMemcpy(d_sym_pt,     symData->point_transforms,   totalCopies * 9 * sizeof(double), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_sym_ft,     symData->field_transforms,   totalCopies * 9 * sizeof(double), cudaMemcpyHostToDevice);
 
         int blockSize = 64;
         int gridSize = (int)((totalPairs + blockSize - 1) / blockSize);
+
+//         assemble_poly_kernel<<<gridSize, blockSize>>>(
+//             N, d_obs, d_centers,
+//             d_face_offsets, d_edge_offsets,
+//             d_face_cz, d_face_rot, d_face_orig, d_edge_pts,
+//             nSym, d_sym_pt, d_sym_ft,
+//             d_out);
 
         assemble_poly_kernel<<<gridSize, blockSize>>>(
             N, d_obs, d_centers,
             d_face_offsets, d_edge_offsets,
             d_face_cz, d_face_rot, d_face_orig, d_edge_pts,
-            nSym, d_sym_pt, d_sym_ft,
+            d_sym_counts, d_sym_offsets, d_sym_pt, d_sym_ft,
             d_out);
 
         cudaError_t err = cudaDeviceSynchronize();
@@ -492,6 +527,7 @@ int radGPU_AssembleMatrix(
         cudaFree(d_face_cz); cudaFree(d_face_rot); cudaFree(d_face_orig);
         cudaFree(d_edge_pts); cudaFree(d_sym_pt); cudaFree(d_sym_ft);
         cudaFree(d_out);
+        cudaFree(d_sym_counts); cudaFree(d_sym_offsets);
     }
     else
     {

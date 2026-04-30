@@ -14,7 +14,7 @@
 #ifdef RADIA_WITH_CUDA
 
 // Maximum symmetry copies: 2^MAX_SYM_PLANES
-#define RADGPU_MAX_SYM_COPIES 64
+//#define RADGPU_MAX_SYM_COPIES 64
 
 // ============================================================
 // Flat geometry for GPU: polyhedron elements
@@ -52,10 +52,18 @@ struct RadGPU_RecMagData {
 // Symmetry transform data
 // ============================================================
 struct RadGPU_SymData {
-    int n_copies;                               // total symmetry copies (including identity)
-    double point_transforms[RADGPU_MAX_SYM_COPIES * 9];  // [n_copies][3x3] point transforms
-    double field_transforms[RADGPU_MAX_SYM_COPIES * 9];  // [n_copies][3x3] field sign transforms
+    int n_elem;                // number of elements
+    int total_copies;          // sum of all sym copies across elements
+    int* sym_counts;           // [n_elem] copies per element
+    int* sym_offsets;          // [n_elem+1] offset into transform arrays
+    double* point_transforms;  // [total_copies * 9] flattened
+    double* field_transforms;  // [total_copies * 9] flattened
 };
+//struct RadGPU_SymData {
+//    int n_copies;                               // total symmetry copies (including identity)
+//    double point_transforms[RADGPU_MAX_SYM_COPIES * 9];  // [n_copies][3x3] point transforms
+//    double field_transforms[RADGPU_MAX_SYM_COPIES * 9];  // [n_copies][3x3] field sign transforms
+//};
 
 // ============================================================
 // Assembly output: flat interaction matrix blocks
@@ -93,6 +101,8 @@ void radGPU_FreeAsmData(
     RadGPU_PolyData* polyData,
     RadGPU_RecMagData* recData,
     RadGPU_AsmResult* result);
+
+void radGPU_FreeSymData(RadGPU_SymData* symData);
 
 #endif // RADIA_WITH_CUDA
 #endif // __RADGPU_ASM_H

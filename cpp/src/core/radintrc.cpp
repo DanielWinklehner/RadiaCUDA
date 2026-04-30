@@ -518,6 +518,7 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 			{
 				radGPU_UnpackMatrix(&result, this);
 				radGPU_FreeAsmData(&polyData, &recData, &result);
+				radGPU_FreeSymData(&symData);
 
 				for(int ClNo=0; ClNo<AmOfMainElem; ClNo++)
 				{
@@ -529,6 +530,7 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 			else
 			{
 				radGPU_FreeAsmData(&polyData, &recData, &result);
+				radGPU_FreeSymData(&symData);
 			}
 		}
 	}
