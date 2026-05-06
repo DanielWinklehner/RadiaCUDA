@@ -4,10 +4,18 @@ import numpy as np
 from PyRadia import flatten
 from PyRadia.field_kernel import fld_gpu
 
+use_sym = True
+
 rad.UtiDelAll()
 
 # Single RecMag block
-r = rad.ObjRecMag([0,0,0], [2,3,4], [0,0,1])
+r = rad.ObjRecMag([0,-3,0], [2, 3, 4], [0,0,1])
+
+if use_sym:
+    rad.TrfZerPerp(r, [0, 0, 0], [1, -1, 0])   # Mirror across x-axis
+    model_symmetries = [
+        ('perp', [0, 0, 0], [1, -1, 0])
+    ]
 
 geo = flatten(r)
 geo.summary()
@@ -23,7 +31,10 @@ pts = np.array([
 print("\n=== Comparison ===")
 for i, pt in enumerate(pts):
     B_ref = np.array(rad.Fld(r, 'b', pt.tolist()))
-    B_gpu = fld_gpu(geo, pt.reshape(1,3))[0]
+    if use_sym:
+        B_gpu = fld_gpu(geo, pt.reshape(1, 3), symmetries=model_symmetries)[0]
+    else:
+        B_gpu = fld_gpu(geo, pt.reshape(1, 3))[0]
     err = np.linalg.norm(B_ref - B_gpu)
     norm = np.linalg.norm(B_ref)
     rel_err = err / norm if norm > 1e-15 else err

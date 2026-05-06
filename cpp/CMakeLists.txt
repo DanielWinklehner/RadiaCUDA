@@ -95,6 +95,7 @@ if(RADIA_WITH_CUDA)
     add_library(radia_cuda STATIC
         ${RAD_CORE_DIR}/radgpurlx.cu
         ${RAD_CORE_DIR}/radgpu_asm.cu
+        ${RAD_CORE_DIR}/radgpu_fld.cu
     )
     set_target_properties(radia_cuda PROPERTIES
         CUDA_ARCHITECTURES "70;75;80;86;89;90"

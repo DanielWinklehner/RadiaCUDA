@@ -31,44 +31,57 @@
 //-------------------------------------------------------------------------
 struct RadGPUFieldFaceData
 {
-    // Face vertices: flat array [n_faces_total * MAX_VERTS * 3]
-    double* h_verts;
-    double* d_verts;
+    // Face vertices in 2D local frame: [n_faces_total * MAX_VERTS * 2]
+    double* h_verts2d;
+    double* d_verts2d;
 
     // Number of vertices per face: [n_faces_total]
     int* h_nverts;
     int* d_nverts;
 
-    // Face outward normals: flat array [n_faces_total * 3]
-    double* h_normals;
-    double* d_normals;
+    // Face coordinate z in local frame: [n_faces_total]
+    double* h_coordz;
+    double* d_coordz;
 
-    // Magnetization vector per face (pre-transformed): [n_faces_total * 3]
+    // Face transform (local->lab): [n_faces_total * 9] row-major 3x3
+    double* h_transform;
+    double* d_transform;
+
+    // Face inverse transform (lab->local): [n_faces_total * 9] row-major 3x3
+    double* h_inv_transform;
+    double* d_inv_transform;
+
+    // Face origin in lab frame: [n_faces_total * 3]
+    double* h_origin;
+    double* d_origin;
+
+    // Magnetization per face (lab frame): [n_faces_total * 3]
     double* h_mag;
     double* d_mag;
 
-    // Total number of faces (after symmetry expansion)
+    // Total number of faces
     int n_faces_total;
 
-    // Observation points: flat array [n_obs * 3]
+    // Observation points: [n_obs * 3]
     double* h_obs;
     double* d_obs;
     int n_obs;
 
-    // Partial results buffer on device: [n_obs * n_src_blocks * 3]
+    // Partial results: [n_obs * n_src_blocks * 3]
     double* d_partial_B;
     int n_src_blocks;
 
-    // Final result device buffer: [n_obs * 3]
+    // Result: [n_obs * 3]
     double* d_result_B;
-
-    // Final result on host: [n_obs * 3] — points to caller's output array
     double* h_result_B;
 
     RadGPUFieldFaceData()
-        : h_verts(nullptr), d_verts(nullptr)
+        : h_verts2d(nullptr), d_verts2d(nullptr)
         , h_nverts(nullptr), d_nverts(nullptr)
-        , h_normals(nullptr), d_normals(nullptr)
+        , h_coordz(nullptr), d_coordz(nullptr)
+        , h_transform(nullptr), d_transform(nullptr)
+        , h_inv_transform(nullptr), d_inv_transform(nullptr)
+        , h_origin(nullptr), d_origin(nullptr)
         , h_mag(nullptr), d_mag(nullptr)
         , n_faces_total(0)
         , h_obs(nullptr), d_obs(nullptr)
@@ -87,6 +100,61 @@ struct RadGPUFieldFaceData
 int radGPU_FldLaunchKernel(RadGPUFieldFaceData* data);
 int radGPU_FldAllocAndCopy(RadGPUFieldFaceData* data);
 int radGPU_FldRetrieveAndFree(RadGPUFieldFaceData* data);
+
+
+//-------------------------------------------------------------------------
+// Structure holding packed RecMag data for GPU field evaluation.
+// Each entry is one RecMag copy (after symmetry expansion).
+//-------------------------------------------------------------------------
+struct RadGPUFieldRecMagData
+{
+    double* h_centers;
+    double* d_centers;
+
+    double* h_dims;
+    double* d_dims;
+
+    double* h_mag;
+    double* d_mag;
+
+    // Rotation matrices: flat array [n_recmags * 9]
+    // Row-major: rot[row*3+col], transforms local->lab: lab = rot * local
+    double* h_rot;
+    double* d_rot;
+
+    int n_recmags;
+
+    double* h_obs;
+    double* d_obs;
+    int n_obs;
+
+    double* d_partial_B;
+    int n_src_blocks;
+
+    double* d_result_B;
+    double* h_result_B;
+
+    RadGPUFieldRecMagData()
+        : h_centers(nullptr), d_centers(nullptr)
+        , h_dims(nullptr), d_dims(nullptr)
+        , h_mag(nullptr), d_mag(nullptr)
+        , h_rot(nullptr), d_rot(nullptr)
+        , n_recmags(0)
+        , h_obs(nullptr), d_obs(nullptr)
+        , n_obs(0)
+        , d_partial_B(nullptr)
+        , n_src_blocks(0)
+        , d_result_B(nullptr)
+        , h_result_B(nullptr)
+    {}
+};
+
+//-------------------------------------------------------------------------
+// RecMag kernel launch/memory functions (implemented in radgpu_fld.cu)
+//-------------------------------------------------------------------------
+int radGPU_FldRecMagAllocAndCopy(RadGPUFieldRecMagData* data);
+int radGPU_FldRecMagLaunchKernel(RadGPUFieldRecMagData* data);
+int radGPU_FldRecMagRetrieveAndFree(RadGPUFieldRecMagData* data);
 
 //-------------------------------------------------------------------------
 // Host-side entry point (implemented in radgpu_fld.cpp)

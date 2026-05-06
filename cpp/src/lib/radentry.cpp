@@ -16,6 +16,11 @@
 //#endif
 #include <ctype.h>
 
+#ifdef RADIA_WITH_CUDA
+#include "radgpu_fld.h"
+#include <cstring>
+#endif
+
 //-------------------------------------------------------------------------
 
 extern "C" {
@@ -967,56 +972,149 @@ EXP int CALL RadRlxUpdSrc(int intrc)
 
 //-------------------------------------------------------------------------
 
+//int CALL RadFld(double* pB, int* pNb, int Obj, char* ID, double* pCoord, int Np)
+//{
+//	double **PointsArray = new double*[Np];
+//	if(PointsArray == 0)
+//	{
+//		ioBuffer.StoreErrorMessage("Radia::Error900"); return ioBuffer.OutErrorStatus();
+//	}
+//	double **tPointsArray = PointsArray;
+//	double *tCoord = pCoord;
+//	for(int i=0; i<Np; i++)
+//	{
+//		*(tPointsArray++) = tCoord;
+//		tCoord += 3;
+//	}
+//
+//	FieldArbitraryPointsArray((long)Obj, ID, PointsArray, (long)Np);
+//
+//	int ErrStat = ioBuffer.OutErrorStatus();
+//	if(ErrStat > 0)
+//	{
+//        if(PointsArray != 0) delete[] PointsArray;
+//		return ErrStat;
+//	}
+//
+//	int Dims[20];
+//	int NumDims=0;
+//	ioBuffer.OutMultiDimArrayOfDouble(pB, Dims, NumDims);
+//
+//	int TotLen = 0; //OC19012020
+//	if(NumDims > 0)
+//	{
+//		TotLen = 1;
+//		for(int k=0; k<NumDims; k++) TotLen *= Dims[k];
+//	}
+//	//int TotLen = 1;
+//	//for(int k=0; k<NumDims; k++) TotLen *= Dims[k];
+//	*pNb = TotLen;
+//
+//	//DEBUG
+//	//std::cout << "RadFld: Nb=" << *pNb << "\n"; //DEBUG
+//	//std::cout.flush(); //DEBUG
+//
+//	//DEBUG
+//	//int rank = 0;
+//	//MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+//	//std::cout << "rank=" << rank << " In RadFld before exiting\n"; //DEBUG
+//	//std::cout.flush(); //DEBUG
+//
+//	if(PointsArray != 0) delete[] PointsArray;
+//	return ErrStat;
+//}
+
 int CALL RadFld(double* pB, int* pNb, int Obj, char* ID, double* pCoord, int Np)
 {
-	double **PointsArray = new double*[Np];
-	if(PointsArray == 0) 
-	{ 
-		ioBuffer.StoreErrorMessage("Radia::Error900"); return ioBuffer.OutErrorStatus();
-	}
-	double **tPointsArray = PointsArray;
-	double *tCoord = pCoord;
-	for(int i=0; i<Np; i++)
-	{
-		*(tPointsArray++) = tCoord;
-		tCoord += 3;
-	}
+#ifdef RADIA_WITH_CUDA
+    // GPU-accelerated path for B field evaluation.
+    // Attempt GPU; on failure, fall through to existing CPU path.
+    {
+        bool isBfield = false;
+        if(ID != nullptr)
+        {
+            isBfield = (strcmp(ID, "b") == 0 || strcmp(ID, "B") == 0
+                     || strcmp(ID, "bx") == 0 || strcmp(ID, "Bx") == 0
+                     || strcmp(ID, "by") == 0 || strcmp(ID, "By") == 0
+                     || strcmp(ID, "bz") == 0 || strcmp(ID, "Bz") == 0);
+        }
 
-	FieldArbitraryPointsArray((long)Obj, ID, PointsArray, (long)Np);
-	
-	int ErrStat = ioBuffer.OutErrorStatus();
-	if(ErrStat > 0)
-	{
+        if(isBfield && Np > 0)
+        {
+            double* arBfull = new double[Np * 3];
+            int gpuRC = radGPU_ComputeField(Obj, pCoord, Np, arBfull);
+
+            if(gpuRC == 0)
+            {
+                if(strcmp(ID, "b") == 0 || strcmp(ID, "B") == 0)
+                {
+                    memcpy(pB, arBfull, Np * 3 * sizeof(double));
+                    *pNb = Np * 3;
+                }
+                else if(strcmp(ID, "bx") == 0 || strcmp(ID, "Bx") == 0)
+                {
+                    for(int i = 0; i < Np; i++) pB[i] = arBfull[i * 3 + 0];
+                    *pNb = Np;
+                }
+                else if(strcmp(ID, "by") == 0 || strcmp(ID, "By") == 0)
+                {
+                    for(int i = 0; i < Np; i++) pB[i] = arBfull[i * 3 + 1];
+                    *pNb = Np;
+                }
+                else if(strcmp(ID, "bz") == 0 || strcmp(ID, "Bz") == 0)
+                {
+                    for(int i = 0; i < Np; i++) pB[i] = arBfull[i * 3 + 2];
+                    *pNb = Np;
+                }
+
+                delete[] arBfull;
+                return 0;
+            }
+
+            // GPU failed — fall through to CPU
+            delete[] arBfull;
+            fprintf(stderr, "radGPU_Fld: GPU path failed, falling back to CPU\n");
+        }
+    }
+#endif // RADIA_WITH_CUDA
+
+    // --- Existing CPU path (unchanged) ---
+    double **PointsArray = new double*[Np];
+    if(PointsArray == 0)
+    {
+        ioBuffer.StoreErrorMessage("Radia::Error900"); return ioBuffer.OutErrorStatus();
+    }
+    double **tPointsArray = PointsArray;
+    double *tCoord = pCoord;
+    for(int i=0; i<Np; i++)
+    {
+        *(tPointsArray++) = tCoord;
+        tCoord += 3;
+    }
+
+    FieldArbitraryPointsArray((long)Obj, ID, PointsArray, (long)Np);
+
+    int ErrStat = ioBuffer.OutErrorStatus();
+    if(ErrStat > 0)
+    {
         if(PointsArray != 0) delete[] PointsArray;
-		return ErrStat;
-	}
+        return ErrStat;
+    }
 
-	int Dims[20];
-	int NumDims=0;
-	ioBuffer.OutMultiDimArrayOfDouble(pB, Dims, NumDims);
+    int Dims[20];
+    int NumDims=0;
+    ioBuffer.OutMultiDimArrayOfDouble(pB, Dims, NumDims);
 
-	int TotLen = 0; //OC19012020
-	if(NumDims > 0)
-	{
-		TotLen = 1; 
-		for(int k=0; k<NumDims; k++) TotLen *= Dims[k];
-	}
-	//int TotLen = 1; 
-	//for(int k=0; k<NumDims; k++) TotLen *= Dims[k];
-	*pNb = TotLen;
+    int TotLen = 0;
+    if(NumDims > 0)
+    {
+        TotLen = 1;
+        for(int k=0; k<NumDims; k++) TotLen *= Dims[k];
+    }
+    *pNb = TotLen;
 
-	//DEBUG
-	//std::cout << "RadFld: Nb=" << *pNb << "\n"; //DEBUG
-	//std::cout.flush(); //DEBUG
-
-	//DEBUG
-	//int rank = 0;
-	//MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-	//std::cout << "rank=" << rank << " In RadFld before exiting\n"; //DEBUG
-	//std::cout.flush(); //DEBUG
-
-	if(PointsArray != 0) delete[] PointsArray;
-	return ErrStat;
+    if(PointsArray != 0) delete[] PointsArray;
+    return ErrStat;
 }
 
 //-------------------------------------------------------------------------

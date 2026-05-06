@@ -1,14 +1,6 @@
 /************************************************************************//**
  * File: radgpu_fld.cpp
  * Description: Host-side geometry packing for GPU-accelerated field eval.
- *              Walks Radia's internal object tree using existing Radia
- *              transform infrastructure. Extracts polygon faces from
- *              polyhedra and RecMags. Handles arbitrary nested symmetries.
- *              Computes coil (current source) contributions on CPU and
- *              adds them to the GPU result.
- *
- *              Follows the packing pattern established in radgpu_asm.cpp.
- *
  * Project: RadiaCUDA
  * First release: 2026
  *
@@ -26,440 +18,288 @@
 #include "radvlpgn.h"
 #include "radplnr.h"
 #include "radgroup.h"
-#include "radarccu.h"
 #include "radtrans.h"
-#include "radexpgn.h"
-#include "radflm.h"
 
 #include <vector>
 #include <cstring>
 #include <cmath>
 #include <cstdio>
 
+#ifdef RADIA_WITH_MPI
+#include <mpi.h>
+#endif
+
 //=========================================================================
-// Internal data structures for collecting faces and coil references
+// Internal data structures
 //=========================================================================
 
 struct FldFaceInfo
 {
-    double verts[RADGPU_FLD_MAX_VERTS * 3];
+    double verts2d[RADGPU_FLD_MAX_VERTS * 2];  // 2D vertices in face local frame
     int nverts;
-    double normal[3];
-    double mag[3];
+    double coordz;         // z coordinate of polygon in face local frame
+    double transform[9];   // local->lab rotation (row-major)
+    double inv_transform[9]; // lab->local rotation (row-major)
+    double origin[3];      // face origin in lab frame
+    double mag[3];         // magnetization in lab frame
 };
 
-// Reference to a current-carrying object for CPU field eval
-struct CoilRef
+struct FldRecMagInfo
 {
-    radTg3d* g3dPtr;           // pointer to the coil object
-    radTrans* pAccumTrans;     // accumulated transform (owned by Radia, do not delete)
-    // For objects with symmetry copies, we store one CoilRef per copy
+    double center[3];   // center in lab frame
+    double dims[3];     // dimensions in LOCAL frame (always axis-aligned)
+    double mag[3];      // magnetization in LOCAL frame
+    double rot[9];      // rotation matrix: lab_vec = rot * local_vec (row-major)
+    double origin[3];   // translation: lab_point = rot * local_point + origin
+};
+
+//=========================================================================
+// Transform chain — applies transforms sequentially using Radia's methods
+//=========================================================================
+
+struct TransformChain
+{
+    std::vector<radTrans*> chain;  // outer-to-inner order
+
+    TVector3d TransformPoint(const TVector3d& p) const
+    {
+        TVector3d result = p;
+        for (int i = (int)chain.size() - 1; i >= 0; i--)
+        {
+            if (chain[i] != nullptr)
+                result = chain[i]->TrPoint(result);
+        }
+        return result;
+    }
+
+    TVector3d TransformDirection(const TVector3d& v) const
+    {
+        TVector3d zero(0, 0, 0);
+        TVector3d result_v = v;
+        TVector3d result_z = zero;
+        for (int i = (int)chain.size() - 1; i >= 0; i--)
+        {
+            if (chain[i] != nullptr)
+            {
+                result_v = chain[i]->TrBiPoint(result_v);
+                result_z = chain[i]->TrBiPoint(result_z);
+            }
+        }
+        result_v.x -= result_z.x;
+        result_v.y -= result_z.y;
+        result_v.z -= result_z.z;
+        return result_v;
+    }
+
+    TVector3d TransformField(const TVector3d& v) const
+    {
+        TVector3d result = v;
+        for (int i = (int)chain.size() - 1; i >= 0; i--)
+        {
+            if (chain[i] != nullptr)
+                result = chain[i]->TrVectField(result);
+        }
+        return result;
+    }
+
+    // Get the full rotation matrix and translation for this chain.
+    // Used for RecMag kernel which needs to transform obs points to local frame.
+    void GetRotationAndTranslation(double rot[9], double origin[3]) const
+    {
+        TVector3d ex(1, 0, 0), ey(0, 1, 0), ez(0, 0, 1), zero(0, 0, 0);
+
+        TVector3d labEx = TransformDirection(ex);
+        TVector3d labEy = TransformDirection(ey);
+        TVector3d labEz = TransformDirection(ez);
+        TVector3d labOrigin = TransformPoint(zero);
+
+        // rot transforms local -> lab: lab_vec = rot * local_vec
+        // Row-major: rot[row*3 + col]
+        rot[0] = labEx.x; rot[1] = labEy.x; rot[2] = labEz.x;
+        rot[3] = labEx.y; rot[4] = labEy.y; rot[5] = labEz.y;
+        rot[6] = labEx.z; rot[7] = labEy.z; rot[8] = labEz.z;
+
+        origin[0] = labOrigin.x;
+        origin[1] = labOrigin.y;
+        origin[2] = labOrigin.z;
+    }
 };
 
 //=========================================================================
 // Forward declarations
 //=========================================================================
 
-static void CollectFacesAndCoils(
+static void CollectElementsRecursive(
     radTg3d* g3dPtr,
     radTCast& Cast,
-    std::vector<radTrans*>& transStack,  // accumulated transforms from container tree
+    TransformChain& tChain,
     std::vector<FldFaceInfo>& faces,
-    std::vector<CoilRef>& coils);
-
-static void ExtractFacesFromRelaxObj(
-    radTg3dRelax* relaxPtr,
-    radTCast& Cast,
-    radTrans* pCombinedTrans,            // combined transform (lab frame)
-    std::vector<FldFaceInfo>& faces);
+    std::vector<FldRecMagInfo>& recmags,
+    bool& hasCurrentSources,
+    bool mirrored);
 
 static void AddPolyhedronFaces(
     radTPolyhedron* poly,
-    radTrans* pTrans,
+    const TransformChain& tChain,
     const TVector3d& labMag,
-    std::vector<FldFaceInfo>& faces);
+    std::vector<FldFaceInfo>& faces,
+    bool mirrored);
 
-static void AddRecMagFaces(
+static void AddRecMag(
     radTRecMag* rec,
-    radTrans* pTrans,
-    const TVector3d& labMag,
-    std::vector<FldFaceInfo>& faces);
-
-static void AddExtrPolygonFaces(
-    radTExtrPolygon* extr,
-    radTrans* pTrans,
-    const TVector3d& labMag,
-    std::vector<FldFaceInfo>& faces);
-
-static bool IsCurrentCarrying(radTg3d* g3dPtr, radTCast& Cast);
+    const TransformChain& tChain,
+    std::vector<FldRecMagInfo>& recmags);
 
 //=========================================================================
-// Transform helpers — use Radia's own radTrans rather than hand-rolling
+// Recursive tree walk
 //=========================================================================
 
-// Combine two transforms into a new one: result = outer * inner
-// Caller owns the returned pointer and must delete it.
-static radTrans* CombineTransforms(radTrans* pOuter, radTrans* pInner)
-{
-    if (pOuter == nullptr) return pInner;  // no copy needed, just reuse
-    if (pInner == nullptr) return pOuter;
-
-    // Use Radia's own matrix multiply.
-    // A radTrans stores: M (rotation), V (translation), s (det), IsNotFieldInversion
-    // Combined point transform: P' = M_outer * (M_inner * P + V_inner) + V_outer
-    //                             = (M_outer * M_inner) * P + (M_outer * V_inner + V_outer)
-    // Field transform: TrVectField(v) = s * fieldSign * M * v
-    // Combined: s_combined = s_outer * s_inner, fieldSign_combined = fS_outer * fS_inner
-
-    TVector3d zero(0, 0, 0);
-    TVector3d ex(1, 0, 0), ey(0, 1, 0), ez(0, 0, 1);
-
-    // Get rotation matrix of outer transform by transforming basis vectors
-    TVector3d outerOrigin = pOuter->TrPoint(zero);
-    TVector3d outerEx = pOuter->TrPoint(ex) - outerOrigin;
-    TVector3d outerEy = pOuter->TrPoint(ey) - outerOrigin;
-    TVector3d outerEz = pOuter->TrPoint(ez) - outerOrigin;
-
-    // Combined rotation: apply inner then outer
-    TVector3d innerP_ex = pInner->TrPoint(ex);
-    TVector3d innerP_ey = pInner->TrPoint(ey);
-    TVector3d innerP_ez = pInner->TrPoint(ez);
-    TVector3d innerP_zero = pInner->TrPoint(zero);
-
-    TVector3d combinedEx = pOuter->TrPoint(innerP_ex) - pOuter->TrPoint(innerP_zero);
-    TVector3d combinedEy = pOuter->TrPoint(innerP_ey) - pOuter->TrPoint(innerP_zero);
-    TVector3d combinedEz = pOuter->TrPoint(innerP_ez) - pOuter->TrPoint(innerP_zero);
-    TVector3d combinedV = pOuter->TrPoint(innerP_zero);
-
-    TMatrix3d combinedM;
-    combinedM.Str0 = combinedEx;
-    combinedM.Str1 = combinedEy;
-    combinedM.Str2 = combinedEz;
-
-    // Determine combined det and field sign
-    double s_combined = pOuter->IsTranslation * pInner->IsTranslation;
-    double f_combined = (pOuter->IsNotFieldInversion ? 1.0 : -1.0)
-                      * (pInner->IsNotFieldInversion ? 1.0 : -1.0);
-
-    radTrans* pResult = new radTrans(combinedM, combinedV,
-                                     s_combined,
-                                     f_combined > 0 ? 1.0 : -1.0,
-                                     0);  // ID_No = 0 (internal)
-    return pResult;
-}
-
-// Build repeated-application transforms from a single transform with multiplicity.
-// Returns list of transforms for copies 0..(mult-1), where copy 0 is identity.
-// Caller owns all returned pointers except index 0 (which is nullptr = identity).
-static void BuildSymCopies(
-    radTrans* pBaseTrans, int mult,
-    std::vector<radTrans*>& copies)
-{
-    copies.clear();
-    copies.push_back(nullptr);  // copy 0 = identity (original)
-
-    if (mult <= 1 || pBaseTrans == nullptr) return;
-
-    // Build cumulative powers: T^1, T^2, ..., T^(mult-1)
-    radTrans* pCum = nullptr;
-    for (int c = 1; c < mult; c++)
-    {
-        if (pCum == nullptr)
-        {
-pCum = new radTrans(*pBaseTrans);  // copy of base transform = T^1
-        }
-        else
-        {
-            // pCum = pBaseTrans * pCum (apply base transform one more time)
-            radTrans* pNew = CombineTransforms(pBaseTrans, pCum);
-            if (pNew != pCum && pNew != pBaseTrans)
-            {
-                // pNew is freshly allocated
-                if (c > 1) delete pCum;  // delete previous cumulative (but not the one stored in copies)
-                // Actually we need to keep all copies. Let's just always allocate fresh.
-            }
-            pCum = pNew;
-        }
-        copies.push_back(new radTrans(*pCum));  // store a copy
-    }
-    if (pCum != nullptr && mult > 2) delete pCum;  // cleanup last cumulative
-}
-
-//=========================================================================
-// Recursive tree walk — mirrors the pattern in radgpu_asm.cpp
-// but collects face geometry for field evaluation instead of matrix elements.
-//
-// Uses Radia's own FlattenSpaceTransforms / transform list machinery.
-//=========================================================================
-
-static void CollectFacesAndCoils(
+static void CollectElementsRecursive(
     radTg3d* g3dPtr,
     radTCast& Cast,
-    std::vector<radTrans*>& transStack,  // outer transforms (from container hierarchy)
+    TransformChain& tChain,
     std::vector<FldFaceInfo>& faces,
-    std::vector<CoilRef>& coils)
+    std::vector<FldRecMagInfo>& recmags,
+    bool& hasCurrentSources,
+    bool mirrored = false)
 {
     if (g3dPtr == nullptr) return;
 
-    //---------------------------------------------------------------------
-    // Get this object's own transform list (symmetries applied to it)
-    //---------------------------------------------------------------------
-    radTlphg& ownTransforms = g3dPtr->g3dListOfTransform;
+    // Check if it's a group
+    radTGroup* groupPtr = Cast.GroupCast(g3dPtr);
+    if (groupPtr != nullptr)
+    {
+        for (radTmhg::const_iterator iter = groupPtr->GroupMapOfHandlers.begin();
+             iter != groupPtr->GroupMapOfHandlers.end(); ++iter)
+        {
+            radTg3d* childPtr = Cast.g3dCast(((*iter).second).rep);
+            if (childPtr != nullptr)
+            {
+                CollectElementsRecursive(childPtr, Cast, tChain,
+                                         faces, recmags, hasCurrentSources, mirrored);
+            }
+        }
+        return;
+    }
 
-    // Build flat list of all symmetry copies for this object.
-    // Each entry in g3dListOfTransform has (multiplicity, transform_handle).
-    // Multiple entries multiply combinatorially.
-    // Use Radia's FlattenSpaceTransforms which handles this correctly.
-
+    // Leaf element.
+    // Radia's FlattenSpaceTransforms(vhFlatTrfs) on a leaf returns ALL symmetry transformations
+    // of the object relative to the root if called on the root, but here we just want
+    // all copies of THIS leaf.
     radTvhg vhFlatTrfs;
     g3dPtr->FlattenSpaceTransforms(vhFlatTrfs);
 
-    // vhFlatTrfs contains all symmetry copies as flat transforms.
-    // If empty, the object has no symmetry (just itself).
-    // If non-empty, entry[0] is the first copy's cumulative transform, etc.
-
-    // Build full list of transforms for all copies (including identity for original)
     std::vector<radTrans*> symCopies;
-    symCopies.push_back(nullptr);  // original = identity
-
-    for (size_t i = 0; i < vhFlatTrfs.size(); i++)
+    if (vhFlatTrfs.empty())
     {
-        radTrans* pTr = (radTrans*)(vhFlatTrfs[i].rep);
-        symCopies.push_back(pTr);  // these are owned by Radia, do not delete
-    }
-
-    // If no flattened transforms, just process once with identity
-    // (symCopies already has one nullptr entry)
-
-    //---------------------------------------------------------------------
-    // For each symmetry copy of this object
-    //---------------------------------------------------------------------
-    for (size_t si = 0; si < symCopies.size(); si++)
-    {
-        radTrans* pSymTr = symCopies[si];  // transform for this symmetry copy
-
-        // Combine with outer transforms from transStack
-        // Build cumulative transform: outermost * ... * pSymTr
-        radTrans* pCombined = pSymTr;
-        std::vector<radTrans*> tempAllocs;  // track allocations for cleanup
-
-        for (int ti = (int)transStack.size() - 1; ti >= 0; ti--)
-        {
-            if (transStack[ti] != nullptr)
-            {
-                radTrans* pNew = CombineTransforms(transStack[ti], pCombined);
-                if (pNew != transStack[ti] && pNew != pCombined)
-                {
-                    tempAllocs.push_back(pNew);
-                }
-                pCombined = pNew;
-            }
-        }
-
-        //------------------------------------------------------------------
-        // Check if this is a container/group
-        //------------------------------------------------------------------
-        radTGroup* groupPtr = Cast.GroupCast(g3dPtr);
-        if (groupPtr != nullptr)
-        {
-            // Push this level's combined transform and recurse into children
-            transStack.push_back(pSymTr);
-
-            for (radTmhg::const_iterator iter = groupPtr->GroupMapOfHandlers.begin();
-                 iter != groupPtr->GroupMapOfHandlers.end(); ++iter)
-            {
-                radTg3d* childPtr = Cast.g3dCast(((*iter).second).rep);
-                if (childPtr != nullptr)
-                {
-                    CollectFacesAndCoils(childPtr, Cast, transStack, faces, coils);
-                }
-            }
-
-            transStack.pop_back();
-
-            // Cleanup temp allocations
-            for (size_t t = 0; t < tempAllocs.size(); t++) delete tempAllocs[t];
-            continue;
-        }
-
-        //------------------------------------------------------------------
-        // Leaf element — determine type
-        //------------------------------------------------------------------
-
-        if (IsCurrentCarrying(g3dPtr, Cast))
-        {
-            // Store reference for CPU computation
-            CoilRef ref;
-            ref.g3dPtr = g3dPtr;
-            ref.pAccumTrans = pCombined;  // may be temp — need to handle lifetime
-            // NOTE: For coils, we'll just use Radia's own B_comp which handles
-            // transforms internally. We store the pointer for identification.
-            coils.push_back(ref);
-
-            for (size_t t = 0; t < tempAllocs.size(); t++) delete tempAllocs[t];
-            continue;
-        }
-
-        // Check if it's a magnetized relaxable object
-        radTg3dRelax* relaxPtr = Cast.g3dRelaxCast(g3dPtr);
-        if (relaxPtr != nullptr)
-        {
-            ExtractFacesFromRelaxObj(relaxPtr, Cast, pCombined, faces);
-        }
-
-        // Cleanup temp allocations
-        for (size_t t = 0; t < tempAllocs.size(); t++) delete tempAllocs[t];
-    }
-}
-
-//=========================================================================
-// Extract faces from a relaxable (magnetized) object.
-// pCombinedTrans is the full lab-frame transform for this copy.
-//=========================================================================
-
-static void ExtractFacesFromRelaxObj(
-    radTg3dRelax* relaxPtr,
-    radTCast& Cast,
-    radTrans* pCombinedTrans,
-    std::vector<FldFaceInfo>& faces)
-{
-    // Get magnetization in local frame
-    TVector3d localMag = relaxPtr->Magn;
-
-    // Transform magnetization to lab frame
-    TVector3d labMag;
-    if (pCombinedTrans != nullptr)
-    {
-        labMag = pCombinedTrans->TrVectField(localMag);
+        symCopies.push_back(nullptr);
     }
     else
     {
-        labMag = localMag;
-    }
-
-    // Dispatch based on element type
-    radTRecMag* rec = Cast.RecMagCast(relaxPtr);
-    if (rec != nullptr)
-    {
-        AddRecMagFaces(rec, pCombinedTrans, labMag, faces);
-        return;
-    }
-
-    radTPolyhedron* poly = Cast.PolyhedronCast(relaxPtr);
-    if (poly != nullptr)
-    {
-        AddPolyhedronFaces(poly, pCombinedTrans, labMag, faces);
-        return;
-    }
-
-    radTExtrPolygon* extr = Cast.ExtrPolygonCast(relaxPtr);
-    if (extr != nullptr)
-    {
-        AddExtrPolygonFaces(extr, pCombinedTrans, labMag, faces);
-        return;
-    }
-
-    // Unknown magnetized type — skip silently
-}
-
-//=========================================================================
-// Add 6 quad faces from a RecMag (rectangular parallelepiped).
-//=========================================================================
-
-static void AddRecMagFaces(
-    radTRecMag* rec,
-    radTrans* pTrans,
-    const TVector3d& labMag,
-    std::vector<FldFaceInfo>& faces)
-{
-    TVector3d cen = rec->CentrPoint;
-    double hx = 0.5 * rec->Dimensions.x;
-    double hy = 0.5 * rec->Dimensions.y;
-    double hz = 0.5 * rec->Dimensions.z;
-
-    // 8 corners in local frame
-    TVector3d c[8] = {
-        TVector3d(cen.x - hx, cen.y - hy, cen.z - hz),  // 0
-        TVector3d(cen.x + hx, cen.y - hy, cen.z - hz),  // 1
-        TVector3d(cen.x + hx, cen.y + hy, cen.z - hz),  // 2
-        TVector3d(cen.x - hx, cen.y + hy, cen.z - hz),  // 3
-        TVector3d(cen.x - hx, cen.y - hy, cen.z + hz),  // 4
-        TVector3d(cen.x + hx, cen.y - hy, cen.z + hz),  // 5
-        TVector3d(cen.x + hx, cen.y + hy, cen.z + hz),  // 6
-        TVector3d(cen.x - hx, cen.y + hy, cen.z + hz),  // 7
-    };
-
-    // Transform corners to lab frame
-    TVector3d lc[8];
-    for (int i = 0; i < 8; i++)
-    {
-        lc[i] = (pTrans != nullptr) ? pTrans->TrPoint(c[i]) : c[i];
-    }
-
-    // 6 faces: vertex indices (CCW from outside) and local normals
-    static const int fIdx[6][4] = {
-        {0, 3, 7, 4},  // -X
-        {1, 5, 6, 2},  // +X
-        {0, 4, 5, 1},  // -Y
-        {2, 6, 7, 3},  // +Y
-        {0, 1, 2, 3},  // -Z
-        {4, 7, 6, 5},  // +Z
-    };
-    static const TVector3d localN[6] = {
-        TVector3d(-1, 0, 0), TVector3d(1, 0, 0),
-        TVector3d(0, -1, 0), TVector3d(0, 1, 0),
-        TVector3d(0, 0, -1), TVector3d(0, 0, 1),
-    };
-
-    for (int f = 0; f < 6; f++)
-    {
-        FldFaceInfo fi;
-        memset(&fi, 0, sizeof(fi));
-        fi.nverts = 4;
-
-        for (int v = 0; v < 4; v++)
+        for (size_t i = 0; i < vhFlatTrfs.size(); i++)
         {
-            fi.verts[v * 3 + 0] = lc[fIdx[f][v]].x;
-            fi.verts[v * 3 + 1] = lc[fIdx[f][v]].y;
-            fi.verts[v * 3 + 2] = lc[fIdx[f][v]].z;
+            radTrans* pTr = (radTrans*)(vhFlatTrfs[i].rep);
+            symCopies.push_back(pTr);
+        }
+    }
+
+    size_t nCopies = symCopies.size();
+    for (size_t si = 0; si < nCopies; si++)
+    {
+        bool nextMirrored = mirrored;
+        if (symCopies[si] != nullptr)
+        {
+            tChain.chain.push_back(symCopies[si]);
+            if (symCopies[si]->ShowParity() < 0) nextMirrored = !mirrored;
         }
 
-        // Transform normal to lab frame using TrBiPoint (direction-only transform)
-        TVector3d labN;
-        if (pTrans != nullptr)
+        // Check if magnetized relaxable
+        radTg3dRelax* relaxPtr = Cast.g3dRelaxCast(g3dPtr);
+        if (relaxPtr != nullptr)
         {
-            TVector3d zero(0, 0, 0);
-            labN = pTrans->TrBiPoint(localN[f]) - pTrans->TrBiPoint(zero);
+            // Polyhedron
+            radTPolyhedron* poly = Cast.PolyhedronCast(relaxPtr);
+            if (poly != nullptr)
+            {
+                TVector3d localMag = relaxPtr->Magn;
+                TVector3d labMag = tChain.TransformField(localMag);
+                AddPolyhedronFaces(poly, tChain, labMag, faces, nextMirrored);
+            }
+            else
+            {
+                // RecMag
+                radTRecMag* rec = Cast.RecMagCast(relaxPtr);
+                if (rec != nullptr)
+                {
+                    if (rec->J_IsNotZero) hasCurrentSources = true;
+                    AddRecMag(rec, tChain, recmags);
+                }
+            }
         }
         else
         {
-            labN = localN[f];
+            hasCurrentSources = true;
         }
-        double len = sqrt(labN.x * labN.x + labN.y * labN.y + labN.z * labN.z);
-        if (len > 1e-30) { labN.x /= len; labN.y /= len; labN.z /= len; }
 
-        fi.normal[0] = labN.x;
-        fi.normal[1] = labN.y;
-        fi.normal[2] = labN.z;
-
-        fi.mag[0] = labMag.x;
-        fi.mag[1] = labMag.y;
-        fi.mag[2] = labMag.z;
-
-        faces.push_back(fi);
+        if (symCopies[si] != nullptr) tChain.chain.pop_back();
     }
 }
 
 //=========================================================================
-// Add polygon faces from a Polyhedron.
-// Uses VectHandlePgnAndTrans — same data the CPU B_comp_frM uses.
+// Add a RecMag to the list (store local-frame data + rotation)
+//=========================================================================
+
+static void AddRecMag(
+    radTRecMag* rec,
+    const TransformChain& tChain,
+    std::vector<FldRecMagInfo>& recmags)
+{
+    FldRecMagInfo info;
+
+    // Dimensions in local frame (always axis-aligned)
+    info.dims[0] = rec->Dimensions.x;
+    info.dims[1] = rec->Dimensions.y;
+    info.dims[2] = rec->Dimensions.z;
+
+    // Magnetization in local frame
+    info.mag[0] = rec->Magn.x;
+    info.mag[1] = rec->Magn.y;
+    info.mag[2] = rec->Magn.z;
+
+    // The RecMag's own center is in its "parent" frame.
+    // We need the rotation and translation that maps local to lab.
+    // But the RecMag center is part of the local frame geometry.
+    // The kernel needs: obs_local = rot^T * (obs_lab - center_lab)
+    // where center_lab = tChain.TransformPoint(CentrPoint)
+    //
+    // For the kernel: we store the lab-frame center and orientation.
+    // obs_local = rot^T * (obs_lab - lab_center)
+    // where lab_center = tChain.TransformPoint(rec->CentrPoint)
+
+    TVector3d labCenter = tChain.TransformPoint(rec->CentrPoint);
+    info.center[0] = labCenter.x;
+    info.center[1] = labCenter.y;
+    info.center[2] = labCenter.z;
+
+    // Rotation matrix and origin from chain
+    // We need rot such that: lab_vec = rot * local_vec
+    // tChain.GetRotationAndTranslation gives rot: lab = rot * local
+    // The kernel uses rot^T to go from lab to local.
+    tChain.GetRotationAndTranslation(info.rot, info.origin);
+
+    recmags.push_back(info);
+}
+
+//=========================================================================
+// Add polygon faces from a Polyhedron (unchanged from before)
 //=========================================================================
 
 static void AddPolyhedronFaces(
     radTPolyhedron* poly,
-    radTrans* pTrans,
+    const TransformChain& tChain,
     const TVector3d& labMag,
-    std::vector<FldFaceInfo>& faces)
+    std::vector<FldFaceInfo>& faces,
+    bool mirrored)
 {
     for (int f = 0; f < (int)poly->VectHandlePgnAndTrans.size(); f++)
     {
@@ -472,52 +312,120 @@ static void AddPolyhedronFaces(
         int nv = pgn->AmOfEdgePoints;
         if (nv < 3 || nv > RADGPU_FLD_MAX_VERTS) continue;
 
-        TVector2d* edgePts = pgn->EdgePointsVector;
-        double coordZ = pgn->CoordZ;
+        //------------------------------------------------------------------
+        // Step 1: Get 3D lab-frame vertices (already verified correct)
+        //------------------------------------------------------------------
+        TVector3d labVerts[RADGPU_FLD_MAX_VERTS];
+        for (int v = 0; v < nv; v++)
+        {
+            TVector2d edgePt = pgn->EdgePointsVector[v];
+            double coordZ = pgn->CoordZ;
+            TVector3d localPt(edgePt.x, edgePt.y, coordZ);
+            TVector3d polyPt = (faceTr != nullptr) ? faceTr->TrPoint(localPt) : localPt;
+            labVerts[v] = tChain.TransformPoint(polyPt);
+        }
 
+        //------------------------------------------------------------------
+        // Step 2: Build face-local coordinate system from 3D vertices
+        //         (matching CuPy flatten approach)
+        //         Origin = first vertex
+        //         X axis = along first edge (v0 -> v1), normalized
+        //         Normal = from cross product of first two edges
+        //         Y axis = normal × X (to form right-handed frame)
+        //------------------------------------------------------------------
+        TVector3d origin = labVerts[0];
+
+        // First edge
+        TVector3d e01;
+        e01.x = labVerts[1].x - labVerts[0].x;
+        e01.y = labVerts[1].y - labVerts[0].y;
+        e01.z = labVerts[1].z - labVerts[0].z;
+        double len01 = sqrt(e01.x * e01.x + e01.y * e01.y + e01.z * e01.z);
+        if (len01 < 1e-30) continue;
+
+        TVector3d ax;  // local X axis
+        ax.x = e01.x / len01;
+        ax.y = e01.y / len01;
+        ax.z = e01.z / len01;
+
+        // Second edge (v0 -> v2)
+        TVector3d e02;
+        e02.x = labVerts[2].x - labVerts[0].x;
+        e02.y = labVerts[2].y - labVerts[0].y;
+        e02.z = labVerts[2].z - labVerts[0].z;
+
+        // Normal = e01 × e02
+        TVector3d normal;
+        normal.x = e01.y * e02.z - e01.z * e02.y;
+        normal.y = e01.z * e02.x - e01.x * e02.z;
+        normal.z = e01.x * e02.y - e01.y * e02.x;
+        double lenN = sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+        if (lenN < 1e-30) continue;
+
+        TVector3d az;  // local Z axis = normal direction
+        az.x = normal.x / lenN;
+        az.y = normal.y / lenN;
+        az.z = normal.z / lenN;
+
+        if (mirrored)
+        {
+            az.x = -az.x; az.y = -az.y; az.z = -az.z;
+        }
+
+        // Y axis = Z × X (right-handed)
+        TVector3d ay;
+        ay.x = az.y * ax.z - az.z * ax.y;
+        ay.y = az.z * ax.x - az.x * ax.z;
+        ay.z = az.x * ax.y - az.y * ax.x;
+        // Should already be normalized since ax and az are orthogonal unit vectors
+        // but normalize for safety
+        double lenY = sqrt(ay.x * ay.x + ay.y * ay.y + ay.z * ay.z);
+        if (lenY < 1e-30) continue;
+        ay.x /= lenY; ay.y /= lenY; ay.z /= lenY;
+
+        //------------------------------------------------------------------
+        // Step 3: Build transform matrices
+        //         Transform (local->lab): columns are ax, ay, az
+        //         Inverse (lab->local): rows are ax, ay, az (transpose)
+        //------------------------------------------------------------------
         FldFaceInfo fi;
         memset(&fi, 0, sizeof(fi));
         fi.nverts = nv;
+        fi.coordz = 0.0;  // polygon is at z=0 in our local frame (origin at first vertex)
 
+        // Transform: local->lab (column-major stored as row-major)
+        // T * [lx, ly, lz]^T = lx*ax + ly*ay + lz*az
+        // Row-major: T[row][col] = T[row*3+col]
+        fi.transform[0] = ax.x; fi.transform[1] = ay.x; fi.transform[2] = az.x;
+        fi.transform[3] = ax.y; fi.transform[4] = ay.y; fi.transform[5] = az.y;
+        fi.transform[6] = ax.z; fi.transform[7] = ay.z; fi.transform[8] = az.z;
+
+        // Inverse: lab->local (transpose)
+        fi.inv_transform[0] = ax.x; fi.inv_transform[1] = ax.y; fi.inv_transform[2] = ax.z;
+        fi.inv_transform[3] = ay.x; fi.inv_transform[4] = ay.y; fi.inv_transform[5] = ay.z;
+        fi.inv_transform[6] = az.x; fi.inv_transform[7] = az.y; fi.inv_transform[8] = az.z;
+
+        fi.origin[0] = origin.x;
+        fi.origin[1] = origin.y;
+        fi.origin[2] = origin.z;
+
+        //------------------------------------------------------------------
+        // Step 4: Project 3D vertices to 2D local frame
+        //         For each vertex: dp = vert - origin, then
+        //         x_local = dp · ax, y_local = dp · ay
+        //         (z_local should be ~0 for all vertices)
+        //------------------------------------------------------------------
         for (int v = 0; v < nv; v++)
         {
-            // 3D point in polygon local frame
-            TVector3d localPt(edgePts[v].x, edgePts[v].y, coordZ);
+            double dpx = labVerts[v].x - origin.x;
+            double dpy = labVerts[v].y - origin.y;
+            double dpz = labVerts[v].z - origin.z;
 
-            // Face local → polyhedron local
-            TVector3d polyPt = (faceTr != nullptr) ? faceTr->TrPoint(localPt) : localPt;
-
-            // Polyhedron local → lab
-            TVector3d labPt = (pTrans != nullptr) ? pTrans->TrPoint(polyPt) : polyPt;
-
-            fi.verts[v * 3 + 0] = labPt.x;
-            fi.verts[v * 3 + 1] = labPt.y;
-            fi.verts[v * 3 + 2] = labPt.z;
+            fi.verts2d[v * 2 + 0] = dpx * ax.x + dpy * ax.y + dpz * ax.z;
+            fi.verts2d[v * 2 + 1] = dpx * ay.x + dpy * ay.y + dpz * ay.z;
         }
 
-        // Face normal: polygon local (0,0,1) → face frame → polyhedron → lab
-        TVector3d localNorm(0, 0, 1);
-        TVector3d zero(0, 0, 0);
-
-        TVector3d polyNorm;
-        if (faceTr != nullptr)
-            polyNorm = faceTr->TrBiPoint(localNorm) - faceTr->TrBiPoint(zero);
-        else
-            polyNorm = localNorm;
-
-        TVector3d labNorm;
-        if (pTrans != nullptr)
-            labNorm = pTrans->TrBiPoint(polyNorm) - pTrans->TrBiPoint(zero);
-        else
-            labNorm = polyNorm;
-
-        double len = sqrt(labNorm.x * labNorm.x + labNorm.y * labNorm.y + labNorm.z * labNorm.z);
-        if (len > 1e-30) { labNorm.x /= len; labNorm.y /= len; labNorm.z /= len; }
-
-        fi.normal[0] = labNorm.x;
-        fi.normal[1] = labNorm.y;
-        fi.normal[2] = labNorm.z;
-
+        // Use the original lab-frame magnetization passed in
         fi.mag[0] = labMag.x;
         fi.mag[1] = labMag.y;
         fi.mag[2] = labMag.z;
@@ -527,97 +435,7 @@ static void AddPolyhedronFaces(
 }
 
 //=========================================================================
-// Add faces from an ExtrudedPolygon.
-// Same face structure as Polyhedron (VectHandlePgnAndTrans).
-//=========================================================================
-
-static void AddExtrPolygonFaces(
-    radTExtrPolygon* extr,
-    radTrans* pTrans,
-    const TVector3d& labMag,
-    std::vector<FldFaceInfo>& faces)
-{
-    for (int f = 0; f < (int)extr->VectHandlePgnAndTrans.size(); f++)
-    {
-        radTHandlePgnAndTrans& hpt = extr->VectHandlePgnAndTrans[f];
-        radTPolygon* pgn = (radTPolygon*)(hpt.PgnHndl.rep);
-        if (pgn == nullptr) continue;
-
-        radTrans* faceTr = (radTrans*)(hpt.TransHndl.rep);
-
-        int nv = pgn->AmOfEdgePoints;
-        if (nv < 3 || nv > RADGPU_FLD_MAX_VERTS) continue;
-
-        TVector2d* edgePts = pgn->EdgePointsVector;
-        double coordZ = pgn->CoordZ;
-
-        FldFaceInfo fi;
-        memset(&fi, 0, sizeof(fi));
-        fi.nverts = nv;
-
-        for (int v = 0; v < nv; v++)
-        {
-            TVector3d localPt(edgePts[v].x, edgePts[v].y, coordZ);
-            TVector3d polyPt = (faceTr != nullptr) ? faceTr->TrPoint(localPt) : localPt;
-            TVector3d labPt = (pTrans != nullptr) ? pTrans->TrPoint(polyPt) : polyPt;
-
-            fi.verts[v * 3 + 0] = labPt.x;
-            fi.verts[v * 3 + 1] = labPt.y;
-            fi.verts[v * 3 + 2] = labPt.z;
-        }
-
-        TVector3d localNorm(0, 0, 1);
-        TVector3d zero(0, 0, 0);
-        TVector3d polyNorm = (faceTr != nullptr)
-            ? faceTr->TrBiPoint(localNorm) - faceTr->TrBiPoint(zero)
-            : localNorm;
-        TVector3d labNorm = (pTrans != nullptr)
-            ? pTrans->TrBiPoint(polyNorm) - pTrans->TrBiPoint(zero)
-            : polyNorm;
-
-        double len = sqrt(labNorm.x * labNorm.x + labNorm.y * labNorm.y + labNorm.z * labNorm.z);
-        if (len > 1e-30) { labNorm.x /= len; labNorm.y /= len; labNorm.z /= len; }
-
-        fi.normal[0] = labNorm.x;
-        fi.normal[1] = labNorm.y;
-        fi.normal[2] = labNorm.z;
-
-        fi.mag[0] = labMag.x;
-        fi.mag[1] = labMag.y;
-        fi.mag[2] = labMag.z;
-
-        faces.push_back(fi);
-    }
-}
-
-//=========================================================================
-// Check if an object is current-carrying (coil, arc current, filament, etc.)
-//=========================================================================
-
-static bool IsCurrentCarrying(radTg3d* g3dPtr, radTCast& Cast)
-{
-    // ArcCur, FlmLinCur, RaceTrk (which is a group of ArcCur + RecMag with J)
-    if (Cast.ArcCurCast(g3dPtr) != nullptr) return true;
-    if (Cast.FlmLinCurCast(g3dPtr) != nullptr) return true;
-
-    // RecMag with nonzero current density
-    radTg3dRelax* relaxPtr = Cast.g3dRelaxCast(g3dPtr);
-    if (relaxPtr != nullptr)
-    {
-        radTRecMag* rec = Cast.RecMagCast(relaxPtr);
-        if (rec != nullptr && rec->J_IsNotZero) return true;
-    }
-
-    // Background field source — treated as external, not a coil
-    // but it also needs CPU handling
-    if (Cast.BackgroundFieldSourceCast(g3dPtr) != nullptr) return true;
-
-    return false;
-}
-
-//=========================================================================
-// Compute coil/current-source contributions on CPU using Radia's own B_comp.
-// This leverages the existing CPU path for objects that the GPU doesn't handle.
+// Compute field from current-carrying objects on CPU
 //=========================================================================
 
 static void ComputeCoilFieldCPU(
@@ -626,36 +444,7 @@ static void ComputeCoilFieldCPU(
     double* arCoord, int nP,
     double* arB_additive)
 {
-    // Strategy: call the existing CPU field computation, but ONLY for
-    // current-carrying sub-objects. We do this by calling B_comp on the
-    // full object tree — Radia's virtual dispatch handles everything.
-    // BUT: that would double-count magnetized objects.
-    //
-    // Better approach: Radia's Fld() computes field from the ENTIRE object.
-    // We want ONLY the coil contribution. We can't easily separate them
-    // without either:
-    //   (a) Setting all magnetizations to zero, computing field (= coil only),
-    //       then restoring magnetizations. Too invasive.
-    //   (b) Computing total field on CPU, then subtracting the GPU result.
-    //       Defeats the purpose.
-    //   (c) Walking the tree, finding coil objects, calling B_comp individually.
-    //       This is correct — each coil's B_comp computes only its own contribution.
-    //
-    // We use approach (c): for each current-carrying leaf object, call its
-    // B_comp for each observation point, accumulate into arB_additive.
-    //
-    // Note: Radia's B_comp for a leaf object (e.g., radTArcCur) computes
-    // the field including any symmetry transforms attached to that object.
-    // So we don't need to manually handle coil symmetry copies.
-
-    // Walk tree to find current-carrying leaves
-    // This mirrors how Radia's own recursive field computation works.
-    // We use a simpler iterative approach with a stack.
-
-    struct StackEntry {
-        radTg3d* ptr;
-    };
-
+    struct StackEntry { radTg3d* ptr; };
     std::vector<StackEntry> stack;
     stack.push_back({topObj});
 
@@ -670,7 +459,6 @@ static void ComputeCoilFieldCPU(
         radTGroup* grp = Cast.GroupCast(obj);
         if (grp != nullptr)
         {
-            // Push children
             for (radTmhg::const_iterator it = grp->GroupMapOfHandlers.begin();
                  it != grp->GroupMapOfHandlers.end(); ++it)
             {
@@ -680,20 +468,28 @@ static void ComputeCoilFieldCPU(
             continue;
         }
 
-        // Leaf — check if current-carrying
-        if (!IsCurrentCarrying(obj, Cast)) continue;
+        // Skip relaxable objects (handled by GPU)
+        radTg3dRelax* relaxPtr = Cast.g3dRelaxCast(obj);
+        if (relaxPtr != nullptr)
+        {
+            radTRecMag* rec = Cast.RecMagCast(relaxPtr);
+            if (rec != nullptr && rec->J_IsNotZero)
+            {
+                // TODO: separate J contribution from RecMag
+            }
+            continue;
+        }
 
-        // Compute this coil's field at each observation point
+        // Non-relaxable leaf = current source
         for (int ip = 0; ip < nP; ip++)
         {
-            TVector3d obsP(arCoord[ip * 3 + 0], arCoord[ip * 3 + 1], arCoord[ip * 3 + 2]);
+            TVector3d obsP(arCoord[ip * 3], arCoord[ip * 3 + 1], arCoord[ip * 3 + 2]);
 
             radTField field;
+            memset(&field, 0, sizeof(field));
             field.P = obsP;
             field.FieldKey.B_ = 1;
 
-            // B_comp computes field at field.P, stores result in field.B
-            // It handles the object's own symmetry transforms internally.
             obj->B_comp(&field);
 
             arB_additive[ip * 3 + 0] += field.B.x;
@@ -705,101 +501,202 @@ static void ComputeCoilFieldCPU(
 
 //=========================================================================
 // MAIN ENTRY POINT
-//
-// Called from RadFld() in radentry.cpp.
-// Returns 0 on success, nonzero on failure (caller falls back to full CPU path).
 //=========================================================================
 
 int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB)
 {
-    // Access global application instance
-    extern radTApplication radApp;
-    radTApplication* pApp = &radApp;
+    int mpiRank = 0;
+    int mpiSize = 1;
+#ifdef RADIA_WITH_MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpiRank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpiSize);
+#endif
 
-    // Validate source object
-    radTmhg::const_iterator iter = pApp->GlobalMapOfHandlers.find(indObj);
-    if (iter == pApp->GlobalMapOfHandlers.end()) return -1;
-    radThg hg = (*iter).second;
+    int gpuSuccess = 0;
 
-    radTCast Cast;
-    radTg3d* g3dPtr = Cast.g3dCast(hg.rep);
-    if (g3dPtr == nullptr) return -1;
-
-    // Collect polygon faces from magnetized elements and identify coils
-    std::vector<FldFaceInfo> faces;
-    std::vector<CoilRef> coils;
-    std::vector<radTrans*> transStack;
-
-    CollectFacesAndCoils(g3dPtr, Cast, transStack, faces, coils);
-
-    int nFaces = (int)faces.size();
-
-    // Initialize output to zero
-    memset(arB, 0, (size_t)nP * 3 * sizeof(double));
-
-    //---------------------------------------------------------------------
-    // GPU path: compute field from magnetized polygon faces
-    //---------------------------------------------------------------------
-    if (nFaces > 0)
+    if (mpiRank == 0)
     {
-        RadGPUFieldFaceData data;
-        data.n_faces_total = nFaces;
-        data.n_obs = nP;
-        data.n_src_blocks = (nFaces + RADGPU_FLD_BLOCK_SIZE - 1) / RADGPU_FLD_BLOCK_SIZE;
+        extern radTApplication rad;
+        radTApplication* pApp = &rad;
 
-        // Allocate and fill host arrays
-        size_t verts_count = (size_t)nFaces * RADGPU_FLD_MAX_VERTS * 3;
-        data.h_verts = new double[verts_count]();  // zero-initialized
-        data.h_nverts = new int[nFaces];
-        data.h_normals = new double[(size_t)nFaces * 3];
-        data.h_mag = new double[(size_t)nFaces * 3];
-        data.h_obs = arCoord;    // caller's array, read-only on device
-        data.h_result_B = arB;   // results written here
-
-        for (int f = 0; f < nFaces; f++)
+        radTmhg::const_iterator iter = pApp->GlobalMapOfHandlers.find(indObj);
+        if (iter == pApp->GlobalMapOfHandlers.end())
         {
-            const FldFaceInfo& fi = faces[f];
-            data.h_nverts[f] = fi.nverts;
-
-            int vbase = f * RADGPU_FLD_MAX_VERTS * 3;
-            memcpy(&data.h_verts[vbase], fi.verts, fi.nverts * 3 * sizeof(double));
-
-            data.h_normals[f * 3 + 0] = fi.normal[0];
-            data.h_normals[f * 3 + 1] = fi.normal[1];
-            data.h_normals[f * 3 + 2] = fi.normal[2];
-
-            data.h_mag[f * 3 + 0] = fi.mag[0];
-            data.h_mag[f * 3 + 1] = fi.mag[1];
-            data.h_mag[f * 3 + 2] = fi.mag[2];
+            gpuSuccess = -1;
         }
 
-        // GPU execution
-        int rc = radGPU_FldAllocAndCopy(&data);
-        if (rc == 0) rc = radGPU_FldLaunchKernel(&data);
-        if (rc == 0) rc = radGPU_FldRetrieveAndFree(&data);
-
-        // Free host arrays (not h_obs/h_result_B — those are caller's)
-        delete[] data.h_verts;
-        delete[] data.h_nverts;
-        delete[] data.h_normals;
-        delete[] data.h_mag;
-
-        if (rc != 0)
+        radTCast Cast;
+        radTg3d* g3dPtr = nullptr;
+        if (gpuSuccess == 0)
         {
-            // GPU failed — signal caller to fall back to CPU
-            return -1;
+            radThg hg = (*iter).second;
+            g3dPtr = Cast.g3dCast(hg.rep);
+            if (g3dPtr == nullptr) gpuSuccess = -1;
+        }
+
+        std::vector<FldFaceInfo> faces;
+        std::vector<FldRecMagInfo> recmags;
+        bool hasCurrentSources = false;
+
+        if (gpuSuccess == 0)
+        {
+            TransformChain tChain;
+            CollectElementsRecursive(g3dPtr, Cast, tChain, faces, recmags,
+                                     hasCurrentSources, false);
+        }
+
+        if (gpuSuccess == 0)
+        {
+            int nFaces = (int)faces.size();
+            int nRecMags = (int)recmags.size();
+
+            // Initialize output to zero
+            memset(arB, 0, (size_t)nP * 3 * sizeof(double));
+
+            //-----------------------------------------------------------------
+            // GPU: RecMag kernel
+            //-----------------------------------------------------------------
+            if (nRecMags > 0)
+            {
+                RadGPUFieldRecMagData rmData;
+                rmData.n_recmags = nRecMags;
+                rmData.n_obs = nP;
+                rmData.n_src_blocks = (nRecMags + RADGPU_FLD_BLOCK_SIZE - 1) / RADGPU_FLD_BLOCK_SIZE;
+
+                rmData.h_centers = new double[(size_t)nRecMags * 3];
+                rmData.h_dims = new double[(size_t)nRecMags * 3];
+                rmData.h_mag = new double[(size_t)nRecMags * 3];
+                rmData.h_obs = arCoord;
+                rmData.h_result_B = arB;
+                rmData.h_rot = new double[(size_t)nRecMags * 9];
+
+                for (int r = 0; r < nRecMags; r++)
+                {
+                    const FldRecMagInfo& ri = recmags[r];
+                    memcpy(&rmData.h_centers[r * 3], ri.center, 3 * sizeof(double));
+                    memcpy(&rmData.h_dims[r * 3], ri.dims, 3 * sizeof(double));
+                    memcpy(&rmData.h_mag[r * 3], ri.mag, 3 * sizeof(double));
+                    memcpy(&rmData.h_rot[r * 9], ri.rot, 9 * sizeof(double));
+                }
+
+                int rc = radGPU_FldRecMagAllocAndCopy(&rmData);
+                if (rc == 0) rc = radGPU_FldRecMagLaunchKernel(&rmData);
+                if (rc == 0) rc = radGPU_FldRecMagRetrieveAndFree(&rmData);
+
+                delete[] rmData.h_centers;
+                delete[] rmData.h_dims;
+                delete[] rmData.h_mag;
+                delete[] rmData.h_rot;
+
+                if (rc != 0) gpuSuccess = -1;
+            }
+
+            //-----------------------------------------------------------------
+            // GPU: Polygon face kernel (for polyhedra)
+            //-----------------------------------------------------------------
+            if (gpuSuccess == 0 && nFaces > 0)
+            {
+                RadGPUFieldFaceData fData;
+                fData.n_faces_total = nFaces;
+                fData.n_obs = nP;
+                fData.n_src_blocks = (nFaces + RADGPU_FLD_BLOCK_SIZE - 1) / RADGPU_FLD_BLOCK_SIZE;
+
+                size_t v2d_count = (size_t)nFaces * RADGPU_FLD_MAX_VERTS * 2;
+                fData.h_verts2d = new double[v2d_count]();
+                fData.h_nverts = new int[nFaces];
+                fData.h_coordz = new double[nFaces];
+                fData.h_transform = new double[(size_t)nFaces * 9];
+                fData.h_inv_transform = new double[(size_t)nFaces * 9];
+                fData.h_origin = new double[(size_t)nFaces * 3];
+                fData.h_mag = new double[(size_t)nFaces * 3];
+                fData.h_obs = arCoord;
+
+                double* polyB = new double[(size_t)nP * 3]();
+                fData.h_result_B = polyB;
+
+                for (int f = 0; f < nFaces; f++)
+                {
+                    const FldFaceInfo& fi = faces[f];
+                    fData.h_nverts[f] = fi.nverts;
+                    fData.h_coordz[f] = fi.coordz;
+
+                    int vbase = f * RADGPU_FLD_MAX_VERTS * 2;
+                    memcpy(&fData.h_verts2d[vbase], fi.verts2d, fi.nverts * 2 * sizeof(double));
+
+                    memcpy(&fData.h_transform[f * 9], fi.transform, 9 * sizeof(double));
+                    memcpy(&fData.h_inv_transform[f * 9], fi.inv_transform, 9 * sizeof(double));
+                    memcpy(&fData.h_origin[f * 3], fi.origin, 3 * sizeof(double));
+                    memcpy(&fData.h_mag[f * 3], fi.mag, 3 * sizeof(double));
+                }
+
+//                // DEBUG: dump packed face data
+//                fprintf(stderr, "DEBUG: nFaces=%d\n", nFaces);
+//                for (int f = 0; f < nFaces; f++)
+//                {
+//                    fprintf(stderr, "  Face %d: nv=%d coordz=%.6f\n", f, fData.h_nverts[f], fData.h_coordz[f]);
+//                    fprintf(stderr, "    origin=[%.6f, %.6f, %.6f]\n",
+//                        fData.h_origin[f*3+0], fData.h_origin[f*3+1], fData.h_origin[f*3+2]);
+//                    fprintf(stderr, "    mag=[%.6f, %.6f, %.6f]\n",
+//                        fData.h_mag[f*3+0], fData.h_mag[f*3+1], fData.h_mag[f*3+2]);
+//                    fprintf(stderr, "    transform=\n");
+//                    for (int r = 0; r < 3; r++)
+//                        fprintf(stderr, "      [%.8f, %.8f, %.8f]\n",
+//                            fData.h_transform[f*9+r*3+0], fData.h_transform[f*9+r*3+1], fData.h_transform[f*9+r*3+2]);
+//                    fprintf(stderr, "    inv_transform=\n");
+//                    for (int r = 0; r < 3; r++)
+//                        fprintf(stderr, "      [%.8f, %.8f, %.8f]\n",
+//                            fData.h_inv_transform[f*9+r*3+0], fData.h_inv_transform[f*9+r*3+1], fData.h_inv_transform[f*9+r*3+2]);
+//                    int vbase = f * RADGPU_FLD_MAX_VERTS * 2;
+//                    for (int v = 0; v < fData.h_nverts[f]; v++)
+//                        fprintf(stderr, "    v2d_%d=[%.8f, %.8f]\n", v,
+//                            fData.h_verts2d[vbase+v*2+0], fData.h_verts2d[vbase+v*2+1]);
+//                }
+
+                int rc = radGPU_FldAllocAndCopy(&fData);
+                if (rc == 0) rc = radGPU_FldLaunchKernel(&fData);
+                if (rc == 0) rc = radGPU_FldRetrieveAndFree(&fData);
+
+                // Add polygon contribution to total
+                if (rc == 0)
+                {
+                    for (int i = 0; i < nP * 3; i++)
+                        arB[i] += polyB[i];
+                }
+
+                delete[] fData.h_verts2d;
+                delete[] fData.h_nverts;
+                delete[] fData.h_coordz;
+                delete[] fData.h_transform;
+                delete[] fData.h_inv_transform;
+                delete[] fData.h_origin;
+                delete[] fData.h_mag;
+                delete[] polyB;
+
+                if (rc != 0) gpuSuccess = -1;
+            }
+
+            //-----------------------------------------------------------------
+            // CPU: add field from current-carrying objects
+            //-----------------------------------------------------------------
+            if (gpuSuccess == 0 && hasCurrentSources)
+            {
+                ComputeCoilFieldCPU(g3dPtr, Cast, arCoord, nP, arB);
+            }
         }
     }
-
-    //---------------------------------------------------------------------
-    // CPU path: add field contributions from current-carrying objects
-    //---------------------------------------------------------------------
-    if (!coils.empty())
+    else
     {
-        ComputeCoilFieldCPU(g3dPtr, Cast, arCoord, nP, arB);
+        memset(arB, 0, (size_t)nP * 3 * sizeof(double));
     }
 
-    return 0;
+#ifdef RADIA_WITH_MPI
+    if (mpiSize > 1)
+    {
+        MPI_Bcast(&gpuSuccess, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    }
+#endif
+
+    return gpuSuccess;
 }
 
 #endif // RADIA_WITH_CUDA
