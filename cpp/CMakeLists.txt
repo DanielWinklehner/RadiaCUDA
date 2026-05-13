@@ -87,7 +87,7 @@ if(RADIA_WITH_MPI)
     target_link_libraries(radia_core PUBLIC MPI::MPI_CXX)
 endif()
 
-# CUDA GPU-accelerated relaxation
+# CUDA GPU-accelerated assembly, relaxation, and field eval
 if(RADIA_WITH_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)

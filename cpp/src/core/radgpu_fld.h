@@ -165,7 +165,7 @@ int radGPU_FldRecMagRetrieveAndFree(RadGPUFieldRecMagData* data);
 //
 // Returns 0 on success, nonzero on failure (caller should fall back to CPU).
 //-------------------------------------------------------------------------
-int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB);
+int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int use_gpu=1);
 
 #endif // RADIA_WITH_CUDA
 #endif // RADGPU_FLD_H

@@ -775,7 +775,7 @@ EXP int CALL RadSolve(double* D, int* n, int obj, double prec, int iter, int met
 @return integer error code (0 : no error, >0 : error number, <0 : warning number)
 @author O.C.
 */
-EXP int CALL RadFld(double* B, int* nB, int obj, char* id, double* Coords, int np);
+EXP int CALL RadFld(double* B, int* nB, int obj, char* id, double* Coords, int np, int use_gpu=1);
 
 /** Sets general absolute accuracy levels for computation of magnetic field induction (prcB), vector potential (prcA), induction integrals along straight line (prcBint), field force (prcFrc), relativistic particle trajectory coordinates (prcTrjCrd) and angles (prcTrjAng).
 @param n [out] dummy

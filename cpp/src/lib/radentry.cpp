@@ -1024,7 +1024,7 @@ EXP int CALL RadRlxUpdSrc(int intrc)
 //	return ErrStat;
 //}
 
-int CALL RadFld(double* pB, int* pNb, int Obj, char* ID, double* pCoord, int Np)
+int CALL RadFld(double* pB, int* pNb, int Obj, char* ID, double* pCoord, int Np, int use_gpu)
 {
 #ifdef RADIA_WITH_CUDA
     // GPU-accelerated path for B field evaluation.
@@ -1039,10 +1039,10 @@ int CALL RadFld(double* pB, int* pNb, int Obj, char* ID, double* pCoord, int Np)
                      || strcmp(ID, "bz") == 0 || strcmp(ID, "Bz") == 0);
         }
 
-        if(isBfield && Np > 0)
+        if(use_gpu && isBfield && Np > 0)
         {
             double* arBfull = new double[Np * 3];
-            int gpuRC = radGPU_ComputeField(Obj, pCoord, Np, arBfull);
+            int gpuRC = radGPU_ComputeField(Obj, pCoord, Np, arBfull, use_gpu);
 
             if(gpuRC == 0)
             {

@@ -49,7 +49,7 @@ class radTApplication {
 	int m_nProcMPI, m_rankMPI; //OC01012020
 
 #ifdef RADIA_WITH_CUDA
-    friend int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB);
+    friend int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int use_gpu);
 #endif
 
 public:

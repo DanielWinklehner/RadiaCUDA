@@ -57,40 +57,45 @@ void polyhedron_field_fp64(
     int tid = threadIdx.x;
     int nThreads = blockDim.x;
 
-    double px = obs_pts[ip*3+0];
-    double py = obs_pts[ip*3+1];
-    double pz = obs_pts[ip*3+2];
+        double px = obs_pts[ip*3+0];
+        double py = obs_pts[ip*3+1];
+        double pz = obs_pts[ip*3+2];
 
-    const double PI = 3.14159265358979323846;
-    const double ConstForH = 1.0 / (4.0 * PI);
-    const double Max_k = 1.0e+09;
-    const double RelRandMagn = 1.0e-13;
-    const double MaxRelTolToSwitch = 1.0e-07;
+        const double PI = 3.14159265358979323846;
+        const double ConstForH = 1.0 / (4.0 * PI);
+        const double Max_k = 1.0e+09;
+        const double RelRandMagn = 1.0e-13;
+        const double MaxRelTolToSwitch = 1.0e-07;
 
-    double Bx = 0.0, By = 0.0, Bz = 0.0;
+        double Bx = 0.0, By = 0.0, Bz = 0.0;
 
-    for (int ie = tid; ie < n_elem; ie += nThreads)
-    {
-        double mx = magn[ie*3+0], my = magn[ie*3+1], mz = magn[ie*3+2];
-        int f_start = face_offsets[ie], f_end = face_offsets[ie+1];
-        double Hx_sum = 0.0, Hy_sum = 0.0, Hz_sum = 0.0;
-
-        for (int fi = f_start; fi < f_end; fi++)
+        for (int ie = tid; ie < n_elem; ie += nThreads)
         {
-            double ox=face_orig[fi*3+0],oy=face_orig[fi*3+1],oz=face_orig[fi*3+2];
-            double dx=px-ox, dy=py-oy, dz=pz-oz;
-            double r00=face_rot[fi*9+0],r01=face_rot[fi*9+1],r02=face_rot[fi*9+2];
-            double r10=face_rot[fi*9+3],r11=face_rot[fi*9+4],r12=face_rot[fi*9+5];
-            double r20=face_rot[fi*9+6],r21=face_rot[fi*9+7],r22=face_rot[fi*9+8];
+            double mx = magn[ie*3+0], my = magn[ie*3+1], mz = magn[ie*3+2];
+            int f_start = face_offsets[ie], f_end = face_offsets[ie+1];
+            double Hx_sum = 0.0, Hy_sum = 0.0, Hz_sum = 0.0;
 
-            double loc_x=r00*dx+r01*dy+r02*dz;
-            double loc_y=r10*dx+r11*dy+r12*dz;
-            double loc_z_obs=r20*dx+r21*dy+r22*dz;
-            double loc_mz=r20*mx+r21*my+r22*mz;
+            for (int fi = f_start; fi < f_end; fi++)
+            {
+                double ox=face_orig[fi*3+0],oy=face_orig[fi*3+1],oz=face_orig[fi*3+2];
+                double dx=px-ox, dy=py-oy, dz=pz-oz;
+                double r00=face_rot[fi*9+0],r01=face_rot[fi*9+1],r02=face_rot[fi*9+2];
+                double r10=face_rot[fi*9+3],r11=face_rot[fi*9+4],r12=face_rot[fi*9+5];
+                double r20=face_rot[fi*9+6],r21=face_rot[fi*9+7],r22=face_rot[fi*9+8];
 
-            double z = face_cz[fi] - loc_z_obs;
-            if (z == 0.0) z = RelRandMagn;
-            double ze2 = z*z;
+                double loc_x=r00*dx+r01*dy+r02*dz;
+                double loc_y=r10*dx+r11*dy+r12*dz;
+                double loc_z_obs=r20*dx+r21*dy+r22*dz;
+                
+                // Project magnetization onto face normal (local Z)
+                double loc_mz=r20*mx+r21*my+r22*mz;
+
+                double z = face_cz[fi] - loc_z_obs;
+                // Handle z=0 carefully to avoid singularities.
+                // CuPy was reported to be correct here. 
+                // Using a small epsilon to avoid NaN/Inf but not nudge too much.
+                if (fabs(z) < 1e-15) z = (z >= 0.0) ? 1e-15 : -1e-15;
+                double ze2 = z*z;
 
             int e_start=edge_offsets[fi], e_end=edge_offsets[fi+1];
             int n_edges=e_end-e_start;
@@ -230,11 +235,11 @@ void polyhedron_field_fp64(
             double Hy_loc=-ConstForH*loc_mz*Sy;
             double Hz_loc=-ConstForH*loc_mz*Sz;
 
-            Hx_sum+=r00*Hx_loc+r10*Hy_loc+r20*Hz_loc;
-            Hy_sum+=r01*Hx_loc+r11*Hy_loc+r21*Hz_loc;
-            Hz_sum+=r02*Hx_loc+r12*Hy_loc+r22*Hz_loc;
+            Hx_sum += (r00*Hx_loc + r10*Hy_loc + r20*Hz_loc);
+            Hy_sum += (r01*Hx_loc + r11*Hy_loc + r21*Hz_loc);
+            Hz_sum += (r02*Hx_loc + r12*Hy_loc + r22*Hz_loc);
         }
-        Bx+=Hx_sum; By+=Hy_sum; Bz+=Hz_sum;
+        Bx += Hx_sum; By += Hy_sum; Bz += Hz_sum;
     }
 
     __shared__ double sBx[256];
@@ -511,7 +516,9 @@ def fld_gpu(geo, points, component='b', gpu_geo=None, symmetries=None,
     B_total = np.zeros((Np, 3), dtype=np.float64)
 
     for T_pts, M_fld in sym_transforms:
-        pts_sym = (pts @ T_pts.T).astype(np.float64)
+        # T_pts maps source -> copy.
+        # Observation point in copy frame: pts_local = T_pts^-1 @ pts = T_pts.T @ pts
+        pts_sym = (pts @ T_pts).astype(np.float64)
         d_pts = cp.asarray(pts_sym.ravel())
         d_out_B = cp.zeros(Np * 3, dtype=np.float64)
 

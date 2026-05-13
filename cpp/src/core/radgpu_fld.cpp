@@ -102,22 +102,50 @@ struct TransformChain
         return result;
     }
 
+    TVector3d TransformFieldAdjusted(const TVector3d& v, bool mirrored) const
+    {
+        TVector3d result = v;
+        for (int i = (int)chain.size() - 1; i >= 0; i--)
+        {
+            if (chain[i] != nullptr)
+                result = chain[i]->TrVectField(result);
+        }
+        // Radia's TrVectField for mirror (det=-1) is a simple reflection (s=1).
+        // For pseudovectors like B-field (and magnetization), we need an extra minus sign
+        // when parity is negative.
+        if (mirrored) { result.x = -result.x; result.y = -result.y; result.z = -result.z; }
+        return result;
+    }
+
     // Get the full rotation matrix and translation for this chain.
     // Used for RecMag kernel which needs to transform obs points to local frame.
-    void GetRotationAndTranslation(double rot[9], double origin[3]) const
+    void GetRotationAndTranslation(double rot[9], double origin[3], bool mirrored) const
     {
         TVector3d ex(1, 0, 0), ey(0, 1, 0), ez(0, 0, 1), zero(0, 0, 0);
 
         TVector3d labEx = TransformDirection(ex);
         TVector3d labEy = TransformDirection(ey);
         TVector3d labEz = TransformDirection(ez);
+
+        if (mirrored)
+        {
+            labEx.x = -labEx.x; labEx.y = -labEx.y; labEx.z = -labEx.z;
+            labEy.x = -labEy.x; labEy.y = -labEy.y; labEy.z = -labEy.z;
+            labEz.x = -labEz.x; labEz.y = -labEz.y; labEz.z = -labEz.z;
+        }
+
         TVector3d labOrigin = TransformPoint(zero);
+
+        // Precompute values to avoid repeating struct field accesses
+        double lExx = labEx.x, lExy = labEx.y, lExz = labEx.z;
+        double lEyx = labEy.x, lEyy = labEy.y, lEyz = labEy.z;
+        double lEzx = labEz.x, lEzy = labEz.y, lEzz = labEz.z;
 
         // rot transforms local -> lab: lab_vec = rot * local_vec
         // Row-major: rot[row*3 + col]
-        rot[0] = labEx.x; rot[1] = labEy.x; rot[2] = labEz.x;
-        rot[3] = labEx.y; rot[4] = labEy.y; rot[5] = labEz.y;
-        rot[6] = labEx.z; rot[7] = labEy.z; rot[8] = labEz.z;
+        rot[0] = lExx; rot[1] = lEyx; rot[2] = lEzx;
+        rot[3] = lExy; rot[4] = lEyy; rot[5] = lEzy;
+        rot[6] = lExz; rot[7] = lEyz; rot[8] = lEzz;
 
         origin[0] = labOrigin.x;
         origin[1] = labOrigin.y;
@@ -148,7 +176,9 @@ static void AddPolyhedronFaces(
 static void AddRecMag(
     radTRecMag* rec,
     const TransformChain& tChain,
-    std::vector<FldRecMagInfo>& recmags);
+    const TVector3d& labMag,
+    std::vector<FldRecMagInfo>& recmags,
+    bool mirrored);
 
 //=========================================================================
 // Recursive tree walk
@@ -165,83 +195,86 @@ static void CollectElementsRecursive(
 {
     if (g3dPtr == nullptr) return;
 
-    // Check if it's a group
-    radTGroup* groupPtr = Cast.GroupCast(g3dPtr);
-    if (groupPtr != nullptr)
-    {
-        for (radTmhg::const_iterator iter = groupPtr->GroupMapOfHandlers.begin();
-             iter != groupPtr->GroupMapOfHandlers.end(); ++iter)
-        {
-            radTg3d* childPtr = Cast.g3dCast(((*iter).second).rep);
-            if (childPtr != nullptr)
-            {
-                CollectElementsRecursive(childPtr, Cast, tChain,
-                                         faces, recmags, hasCurrentSources, mirrored);
-            }
-        }
-        return;
-    }
+    // We process each transform in the current object's transform list
+    // Radia iterates over g3dListOfTransform from end to beginning (reverse_iterator)
+    // to match the order of application.
 
-    // Leaf element.
-    // Radia's FlattenSpaceTransforms(vhFlatTrfs) on a leaf returns ALL symmetry transformations
-    // of the object relative to the root if called on the root, but here we just want
-    // all copies of THIS leaf.
     radTvhg vhFlatTrfs;
     g3dPtr->FlattenSpaceTransforms(vhFlatTrfs);
 
-    std::vector<radTrans*> symCopies;
-    if (vhFlatTrfs.empty())
+    if (g3dPtr->g3dListOfTransform.empty() || (vhFlatTrfs.size() == 1 && ((radTrans*)(vhFlatTrfs[0].rep))->IsIdent(1e-12)))
     {
-        symCopies.push_back(nullptr);
-    }
-    else
-    {
-        for (size_t i = 0; i < vhFlatTrfs.size(); i++)
+        // No real transforms on this object.
+        // If it is a group, recurse. If it is a leaf, collect.
+        radTGroup* groupPtr = Cast.GroupCast(g3dPtr);
+        if (groupPtr != nullptr)
         {
-            radTrans* pTr = (radTrans*)(vhFlatTrfs[i].rep);
-            symCopies.push_back(pTr);
-        }
-    }
-
-    size_t nCopies = symCopies.size();
-    for (size_t si = 0; si < nCopies; si++)
-    {
-        bool nextMirrored = mirrored;
-        if (symCopies[si] != nullptr)
-        {
-            tChain.chain.push_back(symCopies[si]);
-            if (symCopies[si]->ShowParity() < 0) nextMirrored = !mirrored;
-        }
-
-        // Check if magnetized relaxable
-        radTg3dRelax* relaxPtr = Cast.g3dRelaxCast(g3dPtr);
-        if (relaxPtr != nullptr)
-        {
-            // Polyhedron
-            radTPolyhedron* poly = Cast.PolyhedronCast(relaxPtr);
-            if (poly != nullptr)
+            for (radTmhg::const_iterator iter = groupPtr->GroupMapOfHandlers.begin();
+                 iter != groupPtr->GroupMapOfHandlers.end(); ++iter)
             {
-                TVector3d localMag = relaxPtr->Magn;
-                TVector3d labMag = tChain.TransformField(localMag);
-                AddPolyhedronFaces(poly, tChain, labMag, faces, nextMirrored);
-            }
-            else
-            {
-                // RecMag
-                radTRecMag* rec = Cast.RecMagCast(relaxPtr);
-                if (rec != nullptr)
-                {
-                    if (rec->J_IsNotZero) hasCurrentSources = true;
-                    AddRecMag(rec, tChain, recmags);
-                }
+                radTg3d* childPtr = Cast.g3dCast(((*iter).second).rep);
+                if (childPtr != nullptr)
+                    CollectElementsRecursive(childPtr, Cast, tChain, faces, recmags, hasCurrentSources, mirrored);
             }
         }
         else
         {
-            hasCurrentSources = true;
+            // Leaf
+            radTg3dRelax* relaxPtr = Cast.g3dRelaxCast(g3dPtr);
+            if (relaxPtr != nullptr)
+            {
+                radTPolyhedron* poly = Cast.PolyhedronCast(relaxPtr);
+                if (poly != nullptr)
+                {
+                    TVector3d localMag = relaxPtr->Magn;
+                    TVector3d labMag = tChain.TransformFieldAdjusted(localMag, mirrored);
+                    AddPolyhedronFaces(poly, tChain, labMag, faces, mirrored);
+                }
+                else
+                {
+                    radTRecMag* rec = Cast.RecMagCast(relaxPtr);
+                    if (rec != nullptr)
+                    {
+                        if (rec->J_IsNotZero) hasCurrentSources = true;
+                        TVector3d localMag = rec->Magn;
+                        TVector3d labMag = tChain.TransformFieldAdjusted(localMag, mirrored);
+                        AddRecMag(rec, tChain, labMag, recmags, mirrored);
+                    }
+                }
+            }
+            else hasCurrentSources = true;
         }
+    }
+    else
+    {
+        // We need to handle the product of symmetries.
+        // Radia's NestedFor_B handles this by recursing through the list of transforms.
+        // For simplicity, we can use FlattenSpaceTransforms which already expands the product.
 
-        if (symCopies[si] != nullptr) tChain.chain.pop_back();
+        for (size_t si = 0; si < vhFlatTrfs.size(); si++)
+        {
+            radTrans* pTr = (radTrans*)(vhFlatTrfs[si].rep);
+            bool nextMirrored = mirrored;
+            bool pushTr = false;
+
+            if (pTr != nullptr && !pTr->IsIdent(1e-12))
+            {
+                tChain.chain.push_back(pTr);
+                if (pTr->ShowParity() < 0) nextMirrored = !mirrored;
+                pushTr = true;
+            }
+
+            // Temporarily clear the transforms of g3dPtr to avoid infinite recursion
+            // and call CollectElementsRecursive again as if it had no transforms.
+            radTlphg savedTrfs;
+            savedTrfs.splice(savedTrfs.begin(), g3dPtr->g3dListOfTransform);
+
+            CollectElementsRecursive(g3dPtr, Cast, tChain, faces, recmags, hasCurrentSources, nextMirrored);
+
+            g3dPtr->g3dListOfTransform.splice(g3dPtr->g3dListOfTransform.begin(), savedTrfs);
+
+            if (pushTr) tChain.chain.pop_back();
+        }
     }
 }
 
@@ -252,7 +285,9 @@ static void CollectElementsRecursive(
 static void AddRecMag(
     radTRecMag* rec,
     const TransformChain& tChain,
-    std::vector<FldRecMagInfo>& recmags)
+    const TVector3d& labMag,
+    std::vector<FldRecMagInfo>& recmags,
+    bool mirrored)
 {
     FldRecMagInfo info;
 
@@ -261,10 +296,10 @@ static void AddRecMag(
     info.dims[1] = rec->Dimensions.y;
     info.dims[2] = rec->Dimensions.z;
 
-    // Magnetization in local frame
-    info.mag[0] = rec->Magn.x;
-    info.mag[1] = rec->Magn.y;
-    info.mag[2] = rec->Magn.z;
+    // Magnetization in lab frame (consistently with Polyhedron lab-frame eval)
+    info.mag[0] = labMag.x;
+    info.mag[1] = labMag.y;
+    info.mag[2] = labMag.z;
 
     // The RecMag's own center is in its "parent" frame.
     // We need the rotation and translation that maps local to lab.
@@ -285,7 +320,7 @@ static void AddRecMag(
     // We need rot such that: lab_vec = rot * local_vec
     // tChain.GetRotationAndTranslation gives rot: lab = rot * local
     // The kernel uses rot^T to go from lab to local.
-    tChain.GetRotationAndTranslation(info.rot, info.origin);
+    tChain.GetRotationAndTranslation(info.rot, info.origin, mirrored);
 
     recmags.push_back(info);
 }
@@ -316,10 +351,10 @@ static void AddPolyhedronFaces(
         // Step 1: Get 3D lab-frame vertices (already verified correct)
         //------------------------------------------------------------------
         TVector3d labVerts[RADGPU_FLD_MAX_VERTS];
+        double coordZ = pgn->CoordZ;
         for (int v = 0; v < nv; v++)
         {
             TVector2d edgePt = pgn->EdgePointsVector[v];
-            double coordZ = pgn->CoordZ;
             TVector3d localPt(edgePt.x, edgePt.y, coordZ);
             TVector3d polyPt = (faceTr != nullptr) ? faceTr->TrPoint(localPt) : localPt;
             labVerts[v] = tChain.TransformPoint(polyPt);
@@ -336,52 +371,41 @@ static void AddPolyhedronFaces(
         TVector3d origin = labVerts[0];
 
         // First edge
-        TVector3d e01;
-        e01.x = labVerts[1].x - labVerts[0].x;
-        e01.y = labVerts[1].y - labVerts[0].y;
-        e01.z = labVerts[1].z - labVerts[0].z;
-        double len01 = sqrt(e01.x * e01.x + e01.y * e01.y + e01.z * e01.z);
+        double e01x = labVerts[1].x - origin.x;
+        double e01y = labVerts[1].y - origin.y;
+        double e01z = labVerts[1].z - origin.z;
+        double len01 = sqrt(e01x * e01x + e01y * e01y + e01z * e01z);
         if (len01 < 1e-30) continue;
 
-        TVector3d ax;  // local X axis
-        ax.x = e01.x / len01;
-        ax.y = e01.y / len01;
-        ax.z = e01.z / len01;
+        double axx = e01x / len01;
+        double axy = e01y / len01;
+        double axz = e01z / len01;
 
         // Second edge (v0 -> v2)
-        TVector3d e02;
-        e02.x = labVerts[2].x - labVerts[0].x;
-        e02.y = labVerts[2].y - labVerts[0].y;
-        e02.z = labVerts[2].z - labVerts[0].z;
+        double e02x = labVerts[2].x - origin.x;
+        double e02y = labVerts[2].y - origin.y;
+        double e02z = labVerts[2].z - origin.z;
 
         // Normal = e01 × e02
-        TVector3d normal;
-        normal.x = e01.y * e02.z - e01.z * e02.y;
-        normal.y = e01.z * e02.x - e01.x * e02.z;
-        normal.z = e01.x * e02.y - e01.y * e02.x;
-        double lenN = sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+        double nx = e01y * e02z - e01z * e02y;
+        double ny = e01z * e02x - e01x * e02z;
+        double nz = e01x * e02y - e01y * e02x;
+        double lenN = sqrt(nx * nx + ny * ny + nz * nz);
         if (lenN < 1e-30) continue;
 
-        TVector3d az;  // local Z axis = normal direction
-        az.x = normal.x / lenN;
-        az.y = normal.y / lenN;
-        az.z = normal.z / lenN;
-
-        if (mirrored)
-        {
-            az.x = -az.x; az.y = -az.y; az.z = -az.z;
-        }
+        double azx = nx / lenN;
+        double azy = ny / lenN;
+        double azz = nz / lenN;
 
         // Y axis = Z × X (right-handed)
-        TVector3d ay;
-        ay.x = az.y * ax.z - az.z * ax.y;
-        ay.y = az.z * ax.x - az.x * ax.z;
-        ay.z = az.x * ax.y - az.y * ax.x;
+        double ayx = azy * axz - azz * axy;
+        double ayy = azz * axx - azx * axz;
+        double ayz = azx * axy - azy * axx;
         // Should already be normalized since ax and az are orthogonal unit vectors
         // but normalize for safety
-        double lenY = sqrt(ay.x * ay.x + ay.y * ay.y + ay.z * ay.z);
+        double lenY = sqrt(ayx * ayx + ayy * ayy + ayz * ayz);
         if (lenY < 1e-30) continue;
-        ay.x /= lenY; ay.y /= lenY; ay.z /= lenY;
+        ayx /= lenY; ayy /= lenY; ayz /= lenY;
 
         //------------------------------------------------------------------
         // Step 3: Build transform matrices
@@ -396,14 +420,14 @@ static void AddPolyhedronFaces(
         // Transform: local->lab (column-major stored as row-major)
         // T * [lx, ly, lz]^T = lx*ax + ly*ay + lz*az
         // Row-major: T[row][col] = T[row*3+col]
-        fi.transform[0] = ax.x; fi.transform[1] = ay.x; fi.transform[2] = az.x;
-        fi.transform[3] = ax.y; fi.transform[4] = ay.y; fi.transform[5] = az.y;
-        fi.transform[6] = ax.z; fi.transform[7] = ay.z; fi.transform[8] = az.z;
+        fi.transform[0] = axx; fi.transform[1] = ayx; fi.transform[2] = azx;
+        fi.transform[3] = axy; fi.transform[4] = ayy; fi.transform[5] = azy;
+        fi.transform[6] = axz; fi.transform[7] = ayz; fi.transform[8] = azz;
 
         // Inverse: lab->local (transpose)
-        fi.inv_transform[0] = ax.x; fi.inv_transform[1] = ax.y; fi.inv_transform[2] = ax.z;
-        fi.inv_transform[3] = ay.x; fi.inv_transform[4] = ay.y; fi.inv_transform[5] = ay.z;
-        fi.inv_transform[6] = az.x; fi.inv_transform[7] = az.y; fi.inv_transform[8] = az.z;
+        fi.inv_transform[0] = axx; fi.inv_transform[1] = axy; fi.inv_transform[2] = axz;
+        fi.inv_transform[3] = ayx; fi.inv_transform[4] = ayy; fi.inv_transform[5] = ayz;
+        fi.inv_transform[6] = azx; fi.inv_transform[7] = azy; fi.inv_transform[8] = azz;
 
         fi.origin[0] = origin.x;
         fi.origin[1] = origin.y;
@@ -421,8 +445,8 @@ static void AddPolyhedronFaces(
             double dpy = labVerts[v].y - origin.y;
             double dpz = labVerts[v].z - origin.z;
 
-            fi.verts2d[v * 2 + 0] = dpx * ax.x + dpy * ax.y + dpz * ax.z;
-            fi.verts2d[v * 2 + 1] = dpx * ay.x + dpy * ay.y + dpz * ay.z;
+            fi.verts2d[v * 2 + 0] = dpx * axx + dpy * axy + dpz * axz;
+            fi.verts2d[v * 2 + 1] = dpx * ayx + dpy * ayy + dpz * ayz;
         }
 
         // Use the original lab-frame magnetization passed in
@@ -503,7 +527,7 @@ static void ComputeCoilFieldCPU(
 // MAIN ENTRY POINT
 //=========================================================================
 
-int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB)
+int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int use_gpu)
 {
     int mpiRank = 0;
     int mpiSize = 1;
@@ -514,7 +538,7 @@ int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB)
 
     int gpuSuccess = 0;
 
-    if (mpiRank == 0)
+    if (use_gpu && mpiRank == 0)
     {
         extern radTApplication rad;
         radTApplication* pApp = &rad;
@@ -629,32 +653,10 @@ int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB)
                     memcpy(&fData.h_mag[f * 3], fi.mag, 3 * sizeof(double));
                 }
 
-//                // DEBUG: dump packed face data
-//                fprintf(stderr, "DEBUG: nFaces=%d\n", nFaces);
-//                for (int f = 0; f < nFaces; f++)
-//                {
-//                    fprintf(stderr, "  Face %d: nv=%d coordz=%.6f\n", f, fData.h_nverts[f], fData.h_coordz[f]);
-//                    fprintf(stderr, "    origin=[%.6f, %.6f, %.6f]\n",
-//                        fData.h_origin[f*3+0], fData.h_origin[f*3+1], fData.h_origin[f*3+2]);
-//                    fprintf(stderr, "    mag=[%.6f, %.6f, %.6f]\n",
-//                        fData.h_mag[f*3+0], fData.h_mag[f*3+1], fData.h_mag[f*3+2]);
-//                    fprintf(stderr, "    transform=\n");
-//                    for (int r = 0; r < 3; r++)
-//                        fprintf(stderr, "      [%.8f, %.8f, %.8f]\n",
-//                            fData.h_transform[f*9+r*3+0], fData.h_transform[f*9+r*3+1], fData.h_transform[f*9+r*3+2]);
-//                    fprintf(stderr, "    inv_transform=\n");
-//                    for (int r = 0; r < 3; r++)
-//                        fprintf(stderr, "      [%.8f, %.8f, %.8f]\n",
-//                            fData.h_inv_transform[f*9+r*3+0], fData.h_inv_transform[f*9+r*3+1], fData.h_inv_transform[f*9+r*3+2]);
-//                    int vbase = f * RADGPU_FLD_MAX_VERTS * 2;
-//                    for (int v = 0; v < fData.h_nverts[f]; v++)
-//                        fprintf(stderr, "    v2d_%d=[%.8f, %.8f]\n", v,
-//                            fData.h_verts2d[vbase+v*2+0], fData.h_verts2d[vbase+v*2+1]);
-//                }
 
-                int rc = radGPU_FldAllocAndCopy(&fData);
-                if (rc == 0) rc = radGPU_FldLaunchKernel(&fData);
-                if (rc == 0) rc = radGPU_FldRetrieveAndFree(&fData);
+               int rc = radGPU_FldAllocAndCopy(&fData);
+               if (rc == 0) rc = radGPU_FldLaunchKernel(&fData);
+               if (rc == 0) rc = radGPU_FldRetrieveAndFree(&fData);
 
                 // Add polygon contribution to total
                 if (rc == 0)
