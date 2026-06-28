@@ -28,7 +28,7 @@ def ObjDrwPyVista(obj, opacity=1.0, show_edges=True):
         print("PyVista not installed. Run: pip install pyvista")
         return
 
-    data = rad.ObjDrwVTK(obj)
+    data = rad.ObjDrwVTK(obj, 'EdgeLines->False')
 
     plotter = pv.Plotter()
     plotter.set_background("white")
