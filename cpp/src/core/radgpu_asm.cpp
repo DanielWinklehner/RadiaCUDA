@@ -394,12 +394,20 @@ void radGPU_UnpackMatrix(
 
     float* blocks = result->matrix_blocks;
     for(int i = 0; i < N; i++) {
+        // Observation-row element's first-copy transform. The CPU assembly finalizes
+        // each block with MainTransPtrArray[StrNo]->TrMatrix_inv (radintrc.cpp:575);
+        // the GPU kernel omits it, so apply it here on unpack. For rows whose element
+        // has no base transform MainTransPtrArray[i] is the identity and this is a
+        // no-op (the common case: pure TrfZerPara/Perp symmetry). Issue #6.
+        radTrans* rowTrans = intrct->MainTransPtrArray[i];
         for(int j = 0; j < N; j++) {
             long long idx = ((long long)i * N + j) * 9;
-            TMatrix3df& m = intrct->InteractMatrix[i][j];
-            m.Str0.x = blocks[idx+0]; m.Str0.y = blocks[idx+1]; m.Str0.z = blocks[idx+2];
-            m.Str1.x = blocks[idx+3]; m.Str1.y = blocks[idx+4]; m.Str1.z = blocks[idx+5];
-            m.Str2.x = blocks[idx+6]; m.Str2.y = blocks[idx+7]; m.Str2.z = blocks[idx+8];
+            TMatrix3d block(
+                TVector3d(blocks[idx+0], blocks[idx+1], blocks[idx+2]),
+                TVector3d(blocks[idx+3], blocks[idx+4], blocks[idx+5]),
+                TVector3d(blocks[idx+6], blocks[idx+7], blocks[idx+8]));
+            if(rowTrans != 0) rowTrans->TrMatrix_inv(block);
+            intrct->InteractMatrix[i][j] = block;
         }
     }
 }
