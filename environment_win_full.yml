@@ -1,9 +1,9 @@
-# environment-win.yml
+# environment_win_full.yml
 name: radiacuda
 channels:
-  - nvidia
   - conda-forge
-  - defaults
+  - nvidia
+  - nodefaults
 dependencies:
   - python=3.12
   - numpy
@@ -25,4 +25,22 @@ dependencies:
   - sympy
   - tqdm
   - impi-devel
+  - h5py
+  - cython
+  - intel-opencl-rt
+  - meshio
+  - numba
+  - occt
+  - pyopencl
+  - pythonocc-core
+  - rtree
+  - trimesh
+  - pyamg
   - pip
+  - pip:
+    - torch
+    - torchvision
+    - torchaudio
+    - warp-lang
+    - bempp-cl
+    - numpy-quaternion

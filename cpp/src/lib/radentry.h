@@ -1070,6 +1070,13 @@ EXP int CALL RadUtiDataGet(char* pcData, const char typeData[3], long key=0); //
 */ 
 EXP int CALL RadUtiVer(double* d);
 
+/** Returns which backend serviced the most recent RadFld B-field evaluation.
+@param pBackend [out] -1 if no B-field RadFld call has occurred yet, 0 if the CPU path was used, 1 if the GPU path was used
+@return integer error code (0 : no error)
+@author DW
+*/
+EXP int CALL RadUtiFldLastBackend(int* pBackend);
+
 /** initializes or finalizes the Message Passing Inteface (MPI) for parallel calculations and returns list of basic MPI process parameters (in the case of initialization): rank of a process and total number of processes.
 @param arPar [out] array of basic MPI parameters: rank of a process [0] and total number of processes [1]
 @param OnOrOff [in] string containing either "on" or "off"

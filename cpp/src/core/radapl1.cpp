@@ -2470,7 +2470,13 @@ int radTApplication::ProcMPI(const char* sCommand, double* arData, long* pnData,
 		}
 		else
 		{
-			MPI_Finalize(); // Finalize the MPI environment.
+			// Only finalize if MPI was actually initialized and not already
+			// finalized, so UtiMPI('off') is a harmless no-op when MPI was never
+			// started (e.g. standalone runs with no mpiexec / no UtiMPI('on')).
+			int mpiInited = 0, mpiFinalized = 0;
+			MPI_Initialized(&mpiInited);
+			MPI_Finalized(&mpiFinalized);
+			if(mpiInited && !mpiFinalized) MPI_Finalize(); // Finalize the MPI environment.
 		}
 
 		if(SendingIsRequired) Send.IntList(arParMPI, 2);

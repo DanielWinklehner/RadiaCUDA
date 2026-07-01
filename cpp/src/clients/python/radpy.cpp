@@ -3171,6 +3171,27 @@ static PyObject* radia_UtiVer(PyObject* self, PyObject* args)
 }
 
 /************************************************************************//**
+ * Reports which backend (GPU or CPU) serviced the most recent Fld B-field call
+ ***************************************************************************/
+static PyObject* radia_UtiFldLastBackend(PyObject* self, PyObject* args)
+{
+	PyObject* oRes = 0;
+	try
+	{
+		int backend = -1;
+		g_pyParse.ProcRes(RadUtiFldLastBackend(&backend));
+
+		const char* s = (backend == 1) ? "gpu" : ((backend == 0) ? "cpu" : "none");
+		oRes = Py_BuildValue("s", s);
+	}
+	catch (const char* erText)
+	{
+		PyErr_SetString(PyExc_RuntimeError, erText);
+	}
+	return oRes;
+}
+
+/************************************************************************//**
  * Utilities: Initializes or finishes MPI (to support parallel computation)
  ***************************************************************************/
 static PyObject* radia_UtiMPI(PyObject* self, PyObject* args)
@@ -3321,7 +3342,8 @@ static PyMethodDef radia_methods[] = {
 	{"UtiDel", radia_UtiDel, METH_VARARGS, "UtiDel(elem) deletes element elem."},
 	{"UtiDelAll", radia_UtiDelAll, METH_VARARGS, "UtiDelAll() deletes all previously created elements."},
 	{"UtiVer", radia_UtiVer, METH_VARARGS, "UtiVer() returns version number of the Radia library."},
-	{"UtiMPI", radia_UtiMPI, METH_VARARGS, "UtiMPI('on|off|share',data,rankFrom,rankTo) initializes (if argument is 'on') or finalizes (in argument is 'off') the Message Passing Inteface (MPI) for parallel calculations and returns list of basic MPI process parameters (in the case of initialization): rank of a process and total number of processes. In the case of first argument is 'share', the function will send data (list or array) from rankFrom (by default 0) to all processes (by default) of to rankTo."},
+	{"UtiFldLastBackend", radia_UtiFldLastBackend, METH_VARARGS, "UtiFldLastBackend() returns which backend serviced the most recent Fld B-field evaluation: 'gpu', 'cpu', or 'none' (if no B-field Fld call has occurred yet). Diagnostic for the GPU path and its CPU fallback."},
+	{"UtiMPI", radia_UtiMPI, METH_VARARGS, "UtiMPI('on|in|off|share|barrier',data,rankFrom,rankTo) controls the Message Passing Interface (MPI) for parallel calculations and returns a list of basic MPI process parameters (rank of the process and total number of processes). With 'on' Radia initializes MPI itself (calls MPI_Init); use 'in' instead when MPI has already been initialized externally (e.g. by mpi4py), in which case Radia only queries the rank and size and does not call MPI_Init. 'off' finalizes MPI (calls MPI_Finalize). With 'share' the function sends data (list or array) from rankFrom (0 by default) to all processes (when rankTo is -1, the default) or to a specific rankTo. With 'barrier' all processes synchronize at an MPI barrier."},
 
 	{NULL, NULL}
 };

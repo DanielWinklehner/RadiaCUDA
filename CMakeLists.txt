@@ -23,11 +23,13 @@ find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h REQUIRED)
 
 if(RADIA_WITH_MPI)
     if(WIN32)
-        # Intel MPI from conda on Windows
+        # Intel MPI from conda on Windows.
+        # Modern Intel MPI (impi-devel >= ~2021.x) ships only impi.lib; the old C++
+        # binding library impicxx.lib was removed (C++ MPI bindings dropped in MPI-3.0).
+        # Radia only uses the C API (#include <mpi.h>), so impi.lib alone is sufficient.
         set(MPI_CXX_ADDITIONAL_INCLUDE_DIRS "$ENV{CONDA_PREFIX}/Library/include")
-        set(MPI_CXX_LIB_NAMES "impi" "impicxx")
+        set(MPI_CXX_LIB_NAMES "impi")
         set(MPI_impi_LIBRARY "$ENV{CONDA_PREFIX}/Library/lib/impi.lib")
-        set(MPI_impicxx_LIBRARY "$ENV{CONDA_PREFIX}/Library/lib/impicxx.lib")
         set(MPI_CXX_HEADER_DIR "$ENV{CONDA_PREFIX}/Library/include")
     endif()
     find_package(MPI REQUIRED COMPONENTS CXX)

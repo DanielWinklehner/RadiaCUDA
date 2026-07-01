@@ -10,10 +10,6 @@
 #include "radentry.h"
 #include "radiobuf.h"
 
-//DEBUG
-//#ifdef _WITH_MPI
-//#include <mpi.h>
-//#endif
 #include <ctype.h>
 
 #ifdef RADIA_WITH_CUDA
@@ -1024,6 +1020,11 @@ EXP int CALL RadRlxUpdSrc(int intrc)
 //	return ErrStat;
 //}
 
+// Records which backend serviced the most recent RadFld B-field evaluation:
+// -1 = none yet, 0 = CPU, 1 = GPU. Exposed via RadUtiFldLastBackend() for
+// diagnostics / testing of the GPU path and its CPU fallback.
+static int g_LastFldBackend = -1;
+
 int CALL RadFld(double* pB, int* pNb, int Obj, char* ID, double* pCoord, int Np, int use_gpu)
 {
 #ifdef RADIA_WITH_CUDA
@@ -1067,6 +1068,7 @@ int CALL RadFld(double* pB, int* pNb, int Obj, char* ID, double* pCoord, int Np,
                     *pNb = Np;
                 }
 
+                g_LastFldBackend = 1;
                 delete[] arBfull;
                 return 0;
             }
@@ -1078,7 +1080,8 @@ int CALL RadFld(double* pB, int* pNb, int Obj, char* ID, double* pCoord, int Np,
     }
 #endif // RADIA_WITH_CUDA
 
-    // --- Existing CPU path (unchanged) ---
+    // --- Existing CPU path ---
+    g_LastFldBackend = 0;
     double **PointsArray = new double*[Np];
     if(PointsArray == 0)
     {
@@ -1696,6 +1699,14 @@ int CALL RadUtiVer(double* d)
 
 	*d = ioBuffer.OutDouble();
 	return ioBuffer.OutErrorStatus();
+}
+
+//-------------------------------------------------------------------------
+
+int CALL RadUtiFldLastBackend(int* pBackend)
+{
+	*pBackend = g_LastFldBackend;
+	return 0;
 }
 
 //-------------------------------------------------------------------------

@@ -25,7 +25,7 @@
 #include <cmath>
 #include <cstdio>
 
-#ifdef RADIA_WITH_MPI
+#ifdef _WITH_MPI
 #include <mpi.h>
 #endif
 
@@ -164,6 +164,7 @@ static void CollectElementsRecursive(
     std::vector<FldFaceInfo>& faces,
     std::vector<FldRecMagInfo>& recmags,
     bool& hasCurrentSources,
+    bool& hasUnsupported,
     bool mirrored);
 
 static void AddPolyhedronFaces(
@@ -176,9 +177,15 @@ static void AddPolyhedronFaces(
 static void AddRecMag(
     radTRecMag* rec,
     const TransformChain& tChain,
-    const TVector3d& labMag,
     std::vector<FldRecMagInfo>& recmags,
     bool mirrored);
+
+static bool TryAddPolyhedronFromConvertible(
+    radTg3dRelax* relaxPtr,
+    radTCast& Cast,
+    const TransformChain& tChain,
+    bool mirrored,
+    std::vector<FldFaceInfo>& faces);
 
 //=========================================================================
 // Recursive tree walk
@@ -191,6 +198,7 @@ static void CollectElementsRecursive(
     std::vector<FldFaceInfo>& faces,
     std::vector<FldRecMagInfo>& recmags,
     bool& hasCurrentSources,
+    bool& hasUnsupported,
     bool mirrored = false)
 {
     if (g3dPtr == nullptr) return;
@@ -214,7 +222,7 @@ static void CollectElementsRecursive(
             {
                 radTg3d* childPtr = Cast.g3dCast(((*iter).second).rep);
                 if (childPtr != nullptr)
-                    CollectElementsRecursive(childPtr, Cast, tChain, faces, recmags, hasCurrentSources, mirrored);
+                    CollectElementsRecursive(childPtr, Cast, tChain, faces, recmags, hasCurrentSources, hasUnsupported, mirrored);
             }
         }
         else
@@ -235,14 +243,44 @@ static void CollectElementsRecursive(
                     radTRecMag* rec = Cast.RecMagCast(relaxPtr);
                     if (rec != nullptr)
                     {
-                        if (rec->J_IsNotZero) hasCurrentSources = true;
-                        TVector3d localMag = rec->Magn;
-                        TVector3d labMag = tChain.TransformFieldAdjusted(localMag, mirrored);
-                        AddRecMag(rec, tChain, labMag, recmags, mirrored);
+                        if (rec->J_IsNotZero)
+                        {
+                            // Current-carrying RecMag (ObjRecCur): a fixed Biot-Savart
+                            // source with zero magnetization. If it is not under any
+                            // symmetry/transform, add its current field on the CPU via
+                            // ComputeCoilFieldCPU (below) while the magnetics stay on the
+                            // GPU (issue #5). If it IS under a transform, that CPU coil
+                            // helper (single-copy B_comp) would drop the symmetry copies,
+                            // so fall back to the full CPU field path instead.
+                            if (!tChain.chain.empty() || mirrored) hasUnsupported = true;
+                            else                                   hasCurrentSources = true;
+                        }
+                        else
+                        {
+                            AddRecMag(rec, tChain, recmags, mirrored);
+                        }
+                    }
+                    else
+                    {
+                        // Relaxable leaf that is neither a polyhedron nor a RecMag
+                        // (e.g. an extruded polygon, radTExtrPolygon). Decompose it
+                        // to a polyhedron (2 caps + mantle faces) and feed its faces
+                        // to the GPU kernel (issue #2); if it cannot be converted,
+                        // fall back to the CPU field path.
+                        if (!TryAddPolyhedronFromConvertible(relaxPtr, Cast, tChain, mirrored, faces))
+                            hasUnsupported = true;
                     }
                 }
             }
-            else hasCurrentSources = true;
+            else
+            {
+                // Non-relaxable leaf = current source (arc, filament, racetrack
+                // segment). ComputeCoilFieldCPU adds it on the CPU but is not
+                // symmetry-aware, so route it there only when it is not under a
+                // symmetry/transform; otherwise fall back to the full CPU field path.
+                if (!tChain.chain.empty() || mirrored) hasUnsupported = true;
+                else                                   hasCurrentSources = true;
+            }
         }
     }
     else
@@ -269,7 +307,7 @@ static void CollectElementsRecursive(
             radTlphg savedTrfs;
             savedTrfs.splice(savedTrfs.begin(), g3dPtr->g3dListOfTransform);
 
-            CollectElementsRecursive(g3dPtr, Cast, tChain, faces, recmags, hasCurrentSources, nextMirrored);
+            CollectElementsRecursive(g3dPtr, Cast, tChain, faces, recmags, hasCurrentSources, hasUnsupported, nextMirrored);
 
             g3dPtr->g3dListOfTransform.splice(g3dPtr->g3dListOfTransform.begin(), savedTrfs);
 
@@ -285,7 +323,6 @@ static void CollectElementsRecursive(
 static void AddRecMag(
     radTRecMag* rec,
     const TransformChain& tChain,
-    const TVector3d& labMag,
     std::vector<FldRecMagInfo>& recmags,
     bool mirrored)
 {
@@ -296,10 +333,16 @@ static void AddRecMag(
     info.dims[1] = rec->Dimensions.y;
     info.dims[2] = rec->Dimensions.z;
 
-    // Magnetization in lab frame (consistently with Polyhedron lab-frame eval)
-    info.mag[0] = labMag.x;
-    info.mag[1] = labMag.y;
-    info.mag[2] = labMag.z;
+    // Magnetization in the block's LOCAL frame (issue #1). The RecMag kernel
+    // evaluates the box field in local coordinates and rotates the result into the
+    // lab frame via info.rot, so it needs the LOCAL magnetization, not the lab one.
+    // info.rot already encodes rotation AND mirror parity (rot = -Mtx for a
+    // reflection, det +1), so rot*Magn reproduces the correct effective lab
+    // magnetization for both rotated and mirror-symmetric copies. Passing the
+    // pre-rotated lab magnetization here would rotate it a second time.
+    info.mag[0] = rec->Magn.x;
+    info.mag[1] = rec->Magn.y;
+    info.mag[2] = rec->Magn.z;
 
     // The RecMag's own center is in its "parent" frame.
     // We need the rotation and translation that maps local to lab.
@@ -459,6 +502,40 @@ static void AddPolyhedronFaces(
 }
 
 //=========================================================================
+// Convert a relaxable leaf that supports ConvertToPolyhedron (e.g. an extruded
+// polygon, radTExtrPolygon) into a temporary polyhedron and collect its faces
+// for the GPU polygon kernel. Returns false if the type cannot be converted, in
+// which case the caller falls back to CPU. Issue #2.
+//=========================================================================
+
+static bool TryAddPolyhedronFromConvertible(
+    radTg3dRelax* relaxPtr,
+    radTCast& Cast,
+    const TransformChain& tChain,
+    bool mirrored,
+    std::vector<FldFaceInfo>& faces)
+{
+    // ConvertToPolyhedron is a no-op returning 0 for types that don't support it
+    // (radg3d.h default), and a pure in-memory conversion for radTExtrPolygon
+    // (radexpgn.cpp) with no global side effects. The radThg handle owns the
+    // temporary polyhedron and frees it on scope exit.
+    radThg polyHandle;
+    if (!relaxPtr->ConvertToPolyhedron(polyHandle, nullptr, 0)) return false;
+    if (polyHandle.rep == nullptr) return false;
+
+    radTg3dRelax* polyRelax = Cast.g3dRelaxCast((radTg3d*)(polyHandle.rep));
+    radTPolyhedron* poly = (polyRelax != nullptr) ? Cast.PolyhedronCast(polyRelax) : nullptr;
+    if (poly == nullptr) return false;
+
+    // The object's own transforms were spliced into tChain before recursing to
+    // this leaf, so relaxPtr->Magn is the local magnetization; adjust to the lab
+    // frame exactly as for a native polyhedron.
+    TVector3d labMag = tChain.TransformFieldAdjusted(relaxPtr->Magn, mirrored);
+    AddPolyhedronFaces(poly, tChain, labMag, faces, mirrored);
+    return true;
+}
+
+//=========================================================================
 // Compute field from current-carrying objects on CPU
 //=========================================================================
 
@@ -499,7 +576,23 @@ static void ComputeCoilFieldCPU(
             radTRecMag* rec = Cast.RecMagCast(relaxPtr);
             if (rec != nullptr && rec->J_IsNotZero)
             {
-                // TODO: separate J contribution from RecMag
+                // Current-carrying RecMag (ObjRecCur): fixed Biot-Savart source with
+                // zero magnetization. Add its current field on the CPU, exactly like the
+                // non-relaxable coil objects below. Only reached for directly-placed
+                // current RecMags (symmetrized ones force a full CPU fallback upstream),
+                // so single-copy B_comp is exact and no transform handling is needed.
+                for (int ip = 0; ip < nP; ip++)
+                {
+                    TVector3d obsP(arCoord[ip * 3], arCoord[ip * 3 + 1], arCoord[ip * 3 + 2]);
+                    radTField field;
+                    memset(&field, 0, sizeof(field));
+                    field.P = obsP;
+                    field.FieldKey.B_ = 1;
+                    rec->B_comp(&field);
+                    arB_additive[ip * 3 + 0] += field.B.x;
+                    arB_additive[ip * 3 + 1] += field.B.y;
+                    arB_additive[ip * 3 + 2] += field.B.z;
+                }
             }
             continue;
         }
@@ -531,9 +624,18 @@ int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int us
 {
     int mpiRank = 0;
     int mpiSize = 1;
-#ifdef RADIA_WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpiRank);
-    MPI_Comm_size(MPI_COMM_WORLD, &mpiSize);
+#ifdef _WITH_MPI
+    // Only query MPI when it has actually been initialized (e.g. via UtiMPI('on')
+    // or mpi4py). This lets the GPU field path run standalone (plain `python`,
+    // no mpiexec / no UtiMPI) without tripping "MPI routine before init". When MPI
+    // is not initialized we run serially as rank 0 of 1.
+    int mpiInited = 0;
+    MPI_Initialized(&mpiInited);
+    if (mpiInited)
+    {
+        MPI_Comm_rank(MPI_COMM_WORLD, &mpiRank);
+        MPI_Comm_size(MPI_COMM_WORLD, &mpiSize);
+    }
 #endif
 
     int gpuSuccess = 0;
@@ -561,12 +663,24 @@ int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int us
         std::vector<FldFaceInfo> faces;
         std::vector<FldRecMagInfo> recmags;
         bool hasCurrentSources = false;
+        bool hasUnsupported = false;
 
         if (gpuSuccess == 0)
         {
             TransformChain tChain;
             CollectElementsRecursive(g3dPtr, Cast, tChain, faces, recmags,
-                                     hasCurrentSources, false);
+                                     hasCurrentSources, hasUnsupported, false);
+        }
+
+        if (gpuSuccess == 0 && hasUnsupported)
+        {
+            // The model contains element types the GPU field path cannot evaluate
+            // correctly (extruded polygons -> issue #2, current-carrying RecMag ->
+            // issue #5). Signal failure so RadFld falls back to the full CPU field
+            // computation rather than returning a wrong/partial result. Under MPI
+            // this gpuSuccess is broadcast below, so every rank falls back together.
+            fprintf(stderr, "radGPU_Fld: unsupported element type on GPU path, falling back to CPU\n");
+            gpuSuccess = -1;
         }
 
         if (gpuSuccess == 0)
@@ -691,8 +805,8 @@ int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int us
         memset(arB, 0, (size_t)nP * 3 * sizeof(double));
     }
 
-#ifdef RADIA_WITH_MPI
-    if (mpiSize > 1)
+#ifdef _WITH_MPI
+    if (mpiInited && mpiSize > 1)
     {
         MPI_Bcast(&gpuSuccess, 1, MPI_INT, 0, MPI_COMM_WORLD);
     }
