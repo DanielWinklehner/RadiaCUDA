@@ -13,6 +13,7 @@
 #include "radgpurlx.h"
 #include "radintrc.h"
 #include "radmater.h"
+#include "radsend.h"
 #include "radg3d.h"
 #include <cstring>
 #include <cstdio>
@@ -161,12 +162,32 @@ int radGPU_PackInteractionData(radTInteraction* intrct, RadGPURelaxData* data)
             }
         }
         else if(mtype == 1) {
-            // Linear anisotropic — approximate as linear isotropic with avg Ksi
-            // (Full anisotropic support is future work)
+            // Linear material (MatLin always instantiates the anisotropic class). Reconstruct
+            // the 3x3 susceptibility tensor by probing M(e_k) - RemMagn (= column k of
+            // KsiTensor). If it is a scalar multiple of the identity (KsiPar == KsiPerp, i.e.
+            // effectively isotropic) the fast scalar GPU path is exact. If it is genuinely
+            // anisotropic the GPU kernel cannot represent the full tensor (issue #4), so warn
+            // and bail: the method-9 dispatch falls back to the CPU solver on a pack failure.
+            TVector3d rm = mat->RemMagn;
+            TVector3d k0 = mat->M(TVector3d(1.0, 0.0, 0.0)) - rm; // (Ksi_xx, Ksi_yx, Ksi_zx)
+            TVector3d k1 = mat->M(TVector3d(0.0, 1.0, 0.0)) - rm; // (Ksi_xy, Ksi_yy, Ksi_zy)
+            TVector3d k2 = mat->M(TVector3d(0.0, 0.0, 1.0)) - rm; // (Ksi_xz, Ksi_yz, Ksi_zz)
+
+            double diag = (k0.x + k1.y + k2.z) / 3.0;
+            double scale = fabs(diag);
+            if(scale < 1.0e-13) scale = 1.0;
+            double tol = 1.0e-9 * scale;
+            double offDiag = fabs(k1.x) + fabs(k2.x) + fabs(k0.y) + fabs(k2.y) + fabs(k0.z) + fabs(k1.z);
+            double diagSpread = fabs(k0.x - diag) + fabs(k1.y - diag) + fabs(k2.z - diag);
+
+            if(offDiag > tol || diagSpread > tol) {
+                // Genuinely anisotropic: GPU solve would be wrong. Fall back to CPU (issue #4).
+                radTSend::WarningMessage("Radia::Warning022");
+                return 0;
+            }
+            // Effectively isotropic (scalar-identity tensor): the scalar path is exact.
             data->h_matType[i] = 0;
-            TVector3d testH(1.0, 0.0, 0.0);
-            TVector3d testM = mat->M(testH);
-            data->h_linKsi[i] = testM.x - mat->RemMagn.x;
+            data->h_linKsi[i] = diag;
         }
         else {
             data->h_matType[i] = 0;

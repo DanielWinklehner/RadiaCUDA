@@ -167,7 +167,7 @@ string radTIOBuffer::err_ar[] = {
 
 //-------------------------------------------------------------------------
 
-int radTIOBuffer::AmOfWarnings = 13; //modify this when adding new warning !!!
+int radTIOBuffer::AmOfWarnings = 14; //modify this when adding new warning !!!
 string radTIOBuffer::warn_ar[] = {
 
 	"Radia::WarningXXX::::Wrong Warning Number.\0",
@@ -183,6 +183,7 @@ string radTIOBuffer::warn_ar[] = {
 	"Radia::Warning019::::MPI is not supported in this version of code; MPI-related command(s) ignored.\0",
 	"Radia::Warning020::::GPU interaction-matrix assembly is not available for this model (unsupported or mixed element types); computation performed on CPU.\0",
 	"Radia::Warning021::::GPU interaction-matrix assembly could not be completed (e.g. insufficient GPU memory); computation performed on CPU.\0",
+	"Radia::Warning022::::GPU relaxation solve does not support anisotropic linear materials (KsiPar != KsiPerp); computation performed on CPU.\0",
 	//insert new warning here
 };
 
