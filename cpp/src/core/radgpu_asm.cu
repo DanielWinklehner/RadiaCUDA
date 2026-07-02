@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <new>          // std::nothrow
 #include <cuda_runtime.h>
 
 // ============================================================
@@ -420,6 +421,24 @@ __global__ void assemble_recmag_kernel(
 // ============================================================
 // Host: Launch assembly
 // ============================================================
+
+// On CUDA error: report which call/line failed, set rc = -1, and jump to the
+// function's `cleanup` label (all device pointers are nullptr-initialized, so the
+// cudaFree() calls there are safe). CU_MALLOC additionally prints the requested
+// size, so an out-of-VRAM interaction matrix reports a clear message instead of
+// surfacing later as a cryptic "unspecified launch failure".
+#define CU_TRY(call) do { cudaError_t _e = (call); if(_e != cudaSuccess) { \
+    fprintf(stderr, "CUDA error: %s\n  at: %s (%s:%d)\n", \
+            cudaGetErrorString(_e), #call, __FILE__, __LINE__); \
+    rc = -1; goto cleanup; } } while(0)
+
+#define CU_MALLOC(ptr, bytes) do { size_t _b = (bytes); \
+    cudaError_t _e = cudaMalloc((void**)&(ptr), _b); \
+    if(_e != cudaSuccess) { \
+        fprintf(stderr, "CUDA malloc failed for %s: %.2f GB requested - %s (%s:%d)\n", \
+                #ptr, (double)_b / 1073741824.0, cudaGetErrorString(_e), __FILE__, __LINE__); \
+        rc = -1; goto cleanup; } } while(0)
+
 int radGPU_AssembleMatrix(
     RadGPU_PolyData* polyData,
     RadGPU_RecMagData* recData,
@@ -435,110 +454,101 @@ int radGPU_AssembleMatrix(
 
     long long totalPairs = (long long)N * N;
 
-    // Allocate output
+    // Allocate output (host). This dense matrix is N*N*9 floats; use nothrow so a
+    // too-large request reports cleanly instead of throwing std::bad_alloc.
     result->N = N;
-    result->matrix_blocks = new float[totalPairs * 9];
-    if(!result->matrix_blocks) return -1;
+    result->matrix_blocks = new (std::nothrow) float[totalPairs * 9];
+    if(!result->matrix_blocks) {
+        fprintf(stderr, "Host allocation failed for interaction matrix: %.2f GB requested "
+                        "(N=%d) - not enough RAM.\n",
+                (double)(totalPairs * 9 * sizeof(float)) / 1073741824.0, N);
+        return -1;
+    }
+
+    int rc = 0;
 
     if(usePoly)
     {
-        // Upload poly data to GPU
-        double *d_obs, *d_centers, *d_face_cz, *d_face_rot, *d_face_orig, *d_edge_pts;
-        int *d_face_offsets, *d_edge_offsets;
-//         double *d_sym_pt, *d_sym_ft;
-        float *d_out;
+        // Upload poly data to GPU. All device pointers are nullptr-initialized so the
+        // `cleanup` label can cudaFree() them unconditionally on any error path.
+        double *d_obs=nullptr, *d_centers=nullptr, *d_face_cz=nullptr, *d_face_rot=nullptr,
+               *d_face_orig=nullptr, *d_edge_pts=nullptr;
+        int *d_face_offsets=nullptr, *d_edge_offsets=nullptr;
+        float *d_out=nullptr;
+        int *d_sym_counts=nullptr, *d_sym_offsets=nullptr;
+        double *d_sym_pt=nullptr, *d_sym_ft=nullptr;
 
         int nFaces = polyData->n_faces_total;
         int nEdges = polyData->n_edges_total;
-//         int nSym = symData->n_copies;
-
-        int *d_sym_counts, *d_sym_offsets;
-        double *d_sym_pt, *d_sym_ft;
-
         int totalCopies = symData->total_copies;
 
-        cudaMalloc(&d_obs,          3*N*sizeof(double));
-        cudaMalloc(&d_centers,      3*N*sizeof(double));
-        cudaMalloc(&d_face_offsets, (N+1)*sizeof(int));
-        cudaMalloc(&d_edge_offsets, (nFaces+1)*sizeof(int));
-        cudaMalloc(&d_face_cz,     nFaces*sizeof(double));
-        cudaMalloc(&d_face_rot,    9*nFaces*sizeof(double));
-        cudaMalloc(&d_face_orig,   3*nFaces*sizeof(double));
-        cudaMalloc(&d_edge_pts,    2*nEdges*sizeof(double));
-//         cudaMalloc(&d_sym_pt,      nSym*9*sizeof(double));
-//         cudaMalloc(&d_sym_ft,      nSym*9*sizeof(double));
-        cudaMalloc(&d_out,         totalPairs*9*sizeof(float));
-
-        cudaMalloc(&d_sym_counts,  N * sizeof(int));
-        cudaMalloc(&d_sym_offsets, (N+1) * sizeof(int));
-        cudaMalloc(&d_sym_pt,     totalCopies * 9 * sizeof(double));
-        cudaMalloc(&d_sym_ft,     totalCopies * 9 * sizeof(double));
-
-        cudaMemcpy(d_obs,          polyData->centers,      3*N*sizeof(double),         cudaMemcpyHostToDevice);
-        cudaMemcpy(d_centers,      polyData->centers,      3*N*sizeof(double),         cudaMemcpyHostToDevice);
-        cudaMemcpy(d_face_offsets, polyData->face_offsets,  (N+1)*sizeof(int),          cudaMemcpyHostToDevice);
-        cudaMemcpy(d_edge_offsets, polyData->edge_offsets,  (nFaces+1)*sizeof(int),     cudaMemcpyHostToDevice);
-        cudaMemcpy(d_face_cz,     polyData->face_cz,       nFaces*sizeof(double),      cudaMemcpyHostToDevice);
-        cudaMemcpy(d_face_rot,    polyData->face_rot,      9*nFaces*sizeof(double),    cudaMemcpyHostToDevice);
-        cudaMemcpy(d_face_orig,   polyData->face_orig,     3*nFaces*sizeof(double),    cudaMemcpyHostToDevice);
-        cudaMemcpy(d_edge_pts,    polyData->edge_pts_2d,   2*nEdges*sizeof(double),    cudaMemcpyHostToDevice);
-//         cudaMemcpy(d_sym_pt,      symData->point_transforms, nSym*9*sizeof(double),    cudaMemcpyHostToDevice);
-//         cudaMemcpy(d_sym_ft,      symData->field_transforms, nSym*9*sizeof(double),    cudaMemcpyHostToDevice);
-
-        cudaMemcpy(d_sym_counts,  symData->sym_counts,        N * sizeof(int),                cudaMemcpyHostToDevice);
-        cudaMemcpy(d_sym_offsets, symData->sym_offsets,        (N+1) * sizeof(int),            cudaMemcpyHostToDevice);
-        cudaMemcpy(d_sym_pt,     symData->point_transforms,   totalCopies * 9 * sizeof(double), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_sym_ft,     symData->field_transforms,   totalCopies * 9 * sizeof(double), cudaMemcpyHostToDevice);
-
+        // Declared before any CU_MALLOC so the goto to `cleanup` never bypasses them.
         int blockSize = 64;
-        int gridSize = (int)((totalPairs + blockSize - 1) / blockSize);
+        long long gridSize = (totalPairs + blockSize - 1) / blockSize;
 
-//         assemble_poly_kernel<<<gridSize, blockSize>>>(
-//             N, d_obs, d_centers,
-//             d_face_offsets, d_edge_offsets,
-//             d_face_cz, d_face_rot, d_face_orig, d_edge_pts,
-//             nSym, d_sym_pt, d_sym_ft,
-//             d_out);
+        // size_t casts keep the byte counts 64-bit (d_out is N*N*9 floats).
+        CU_MALLOC(d_obs,          3*(size_t)N*sizeof(double));
+        CU_MALLOC(d_centers,      3*(size_t)N*sizeof(double));
+        CU_MALLOC(d_face_offsets, ((size_t)N+1)*sizeof(int));
+        CU_MALLOC(d_edge_offsets, ((size_t)nFaces+1)*sizeof(int));
+        CU_MALLOC(d_face_cz,      (size_t)nFaces*sizeof(double));
+        CU_MALLOC(d_face_rot,     9*(size_t)nFaces*sizeof(double));
+        CU_MALLOC(d_face_orig,    3*(size_t)nFaces*sizeof(double));
+        CU_MALLOC(d_edge_pts,     2*(size_t)nEdges*sizeof(double));
+        CU_MALLOC(d_out,          totalPairs*9*sizeof(float));
+        CU_MALLOC(d_sym_counts,   (size_t)N*sizeof(int));
+        CU_MALLOC(d_sym_offsets,  ((size_t)N+1)*sizeof(int));
+        CU_MALLOC(d_sym_pt,       (size_t)totalCopies*9*sizeof(double));
+        CU_MALLOC(d_sym_ft,       (size_t)totalCopies*9*sizeof(double));
 
-        assemble_poly_kernel<<<gridSize, blockSize>>>(
+        CU_TRY(cudaMemcpy(d_obs,          polyData->centers,          3*(size_t)N*sizeof(double),           cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_centers,      polyData->centers,          3*(size_t)N*sizeof(double),           cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_face_offsets, polyData->face_offsets,     ((size_t)N+1)*sizeof(int),            cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_edge_offsets, polyData->edge_offsets,     ((size_t)nFaces+1)*sizeof(int),       cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_face_cz,      polyData->face_cz,          (size_t)nFaces*sizeof(double),        cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_face_rot,     polyData->face_rot,         9*(size_t)nFaces*sizeof(double),      cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_face_orig,    polyData->face_orig,        3*(size_t)nFaces*sizeof(double),      cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_edge_pts,     polyData->edge_pts_2d,      2*(size_t)nEdges*sizeof(double),      cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_sym_counts,   symData->sym_counts,        (size_t)N*sizeof(int),                cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_sym_offsets,  symData->sym_offsets,       ((size_t)N+1)*sizeof(int),            cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_sym_pt,       symData->point_transforms,  (size_t)totalCopies*9*sizeof(double), cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_sym_ft,       symData->field_transforms,  (size_t)totalCopies*9*sizeof(double), cudaMemcpyHostToDevice));
+
+        assemble_poly_kernel<<<(unsigned int)gridSize, blockSize>>>(
             N, d_obs, d_centers,
             d_face_offsets, d_edge_offsets,
             d_face_cz, d_face_rot, d_face_orig, d_edge_pts,
             d_sym_counts, d_sym_offsets, d_sym_pt, d_sym_ft,
             d_out);
 
-        cudaError_t err = cudaDeviceSynchronize();
-        if(err != cudaSuccess) {
-            fprintf(stderr, "CUDA kernel error: %s\n", cudaGetErrorString(err));
-            cudaFree(d_obs); cudaFree(d_centers);
-            cudaFree(d_face_offsets); cudaFree(d_edge_offsets);
-            cudaFree(d_face_cz); cudaFree(d_face_rot); cudaFree(d_face_orig);
-            cudaFree(d_edge_pts); cudaFree(d_sym_pt); cudaFree(d_sym_ft);
-            cudaFree(d_out);
-            delete[] result->matrix_blocks;
-            result->matrix_blocks = nullptr;
-            return -1;
-        }
+        CU_TRY(cudaGetLastError());        // launch-configuration errors (grid/block, args)
+        CU_TRY(cudaDeviceSynchronize());   // in-kernel errors (illegal access, TDR timeout, ...)
 
-        cudaMemcpy(result->matrix_blocks, d_out, totalPairs*9*sizeof(float), cudaMemcpyDeviceToHost);
+        CU_TRY(cudaMemcpy(result->matrix_blocks, d_out, totalPairs*9*sizeof(float), cudaMemcpyDeviceToHost));
 
+    cleanup:
         cudaFree(d_obs); cudaFree(d_centers);
         cudaFree(d_face_offsets); cudaFree(d_edge_offsets);
         cudaFree(d_face_cz); cudaFree(d_face_rot); cudaFree(d_face_orig);
         cudaFree(d_edge_pts); cudaFree(d_sym_pt); cudaFree(d_sym_ft);
         cudaFree(d_out);
         cudaFree(d_sym_counts); cudaFree(d_sym_offsets);
+        if(rc != 0 && result->matrix_blocks) {
+            delete[] result->matrix_blocks;
+            result->matrix_blocks = nullptr;
+        }
     }
     else
     {
-        // RecMag path - not yet implemented
-        fprintf(stderr, "RecMag GPU assembly not yet implemented\n");
+        // RecMag GPU assembly not implemented (assemble_recmag_kernel is an empty stub).
+        // Return -1 so the caller (radTInteraction::SetupInteractMatrix) warns the user
+        // via Send.WarningMessage and falls back to CPU. See issues #8 and #11.
         delete[] result->matrix_blocks;
         result->matrix_blocks = nullptr;
         return -1;
     }
 
-    return 0;
+    return rc;
 }
 
 // ============================================================

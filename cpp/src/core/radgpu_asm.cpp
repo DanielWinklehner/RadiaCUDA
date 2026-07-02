@@ -12,6 +12,7 @@
 
 #include "radgpu_asm.h"
 #include "radintrc.h"
+#include "radsend.h"
 #include "radcast.h"
 #include "radrec.h"
 #include "radvlpgn.h"
@@ -23,78 +24,9 @@
 #include <cmath>
 #include <vector>
 
-// ============================================================
-// Helper: extract face data from a polyhedron
-// ============================================================
-static void ExtractPolyFaceData(
-    radTPolyhedron* poly,
-    std::vector<double>& face_rot,
-    std::vector<double>& face_orig,
-    std::vector<double>& face_cz,
-    std::vector<int>& edge_offsets,
-    std::vector<double>& edge_pts_2d,
-    int& n_faces, int& n_edges)
-{
-    int nf = poly->AmOfFaces;
-    n_faces = nf;
-    n_edges = 0;
-
-    for(int fi = 0; fi < nf; fi++) {
-        radTHandlePgnAndTrans& hpt = poly->VectHandlePgnAndTrans[fi];
-        radTPolygon* pgn = hpt.PgnHndl.rep;
-        radTrans* tr = hpt.TransHndl.rep;
-
-        // Edge offset
-        edge_offsets.push_back((int)edge_pts_2d.size() / 2);
-
-        // Face origin = transform origin (translation part)
-        // The transform maps local 2D+z to lab frame
-        // We need: origin in lab frame, rotation matrix lab->local
-        // TrBiPoint maps local->lab, so rot = TrBiPoint matrix rows
-        // But for the kernel we need lab->local, which is the transpose
-
-        // Get the rotation matrix from the transform
-        // radTrans stores: TrMatrix (3x3), and offset
-        TVector3d origin(0., 0., 0.);
-        origin = tr->TrBiPoint(origin);  // origin in lab frame
-
-        face_orig.push_back(origin.x);
-        face_orig.push_back(origin.y);
-        face_orig.push_back(origin.z);
-
-        // Rotation: lab->local. The transform's TrBiPoint does local->lab.
-        // So lab->local is the inverse = transpose of the rotation part.
-        // We extract by transforming unit vectors:
-        TVector3d ex(1,0,0), ey(0,1,0), ez(0,0,1);
-        TVector3d zero(0,0,0);
-        TVector3d labEx = tr->TrBiPoint(ex) - origin;
-        TVector3d labEy = tr->TrBiPoint(ey) - origin;
-        TVector3d labEz = tr->TrBiPoint(ez) - origin;
-
-        // rot[row][col]: rot * (lab - origin) = local
-        // rows of rot are labEx, labEy, labEz expressed as how they map lab->local
-        // Since TrBiPoint does local->lab, the inverse (lab->local) has rows = columns of TrBiPoint matrix
-        // i.e., rot = transpose of [labEx labEy labEz]
-        // Row 0 of rot (local x): components are labEx.x, labEy.x, labEz.x
-        face_rot.push_back(labEx.x); face_rot.push_back(labEy.y); face_rot.push_back(labEz.z);
-        face_rot.push_back(labEx.x); face_rot.push_back(labEy.y); face_rot.push_back(labEz.z);
-        face_rot.push_back(labEx.x); face_rot.push_back(labEy.y); face_rot.push_back(labEz.z);
-
-        // Face coord z in local frame
-        face_cz.push_back(pgn->CoordZ);
-
-        // Edge points in 2D local frame
-        int ne = pgn->AmOfEdgePoints;
-        for(int ei = 0; ei < ne; ei++) {
-            TVector2d& ep = pgn->EdgePointsVector[ei];
-            edge_pts_2d.push_back(ep.x);
-            edge_pts_2d.push_back(ep.y);
-        }
-        n_edges += ne;
-    }
-    // Final edge offset
-    edge_offsets.push_back((int)edge_pts_2d.size() / 2);
-}
+// (Removed dead, buggy ExtractPolyFaceData helper: it was never called, and its
+//  face_rot fill wrote the same diagonal-only row three times. The live packing in
+//  radGPU_PackGeometryForAsm computes face_rot correctly inline. See issue #11.)
 
 // ============================================================
 // Pack geometry from Radia interaction data
@@ -119,8 +51,6 @@ int radGPU_PackGeometryForAsm(
         if(recPtr) nRec++;
         else if(polyPtr) nPoly++;
     }
-
-    fprintf(stderr, "GPU asm pack: N=%d, nRec=%d, nPoly=%d\n", N, nRec, nPoly);
 
     // --- Extract observation centers (transformed by MainTransPtrArray) ---
     // These are the points where we evaluate the field FROM each source element
@@ -150,7 +80,7 @@ int radGPU_PackGeometryForAsm(
             recData->dims[3*i+2] = rec->Dimensions.z;
         }
     } else if(nRec > 0) {
-        fprintf(stderr, "GPU asm: mixed element types not yet supported\n");
+        radTSend::WarningMessage("Radia::Warning020");
         delete[] obsCenters;
         return 0;
     }
@@ -228,7 +158,7 @@ int radGPU_PackGeometryForAsm(
         polyData->face_offsets[N] = faceIdx;
         polyData->edge_offsets[totalFaces] = edgeIdx;
     } else if(nPoly > 0) {
-        fprintf(stderr, "GPU asm: mixed element types not yet supported\n");
+        radTSend::WarningMessage("Radia::Warning020");
         if(nRec == 0) delete[] obsCenters;
         return 0;
     }
@@ -239,74 +169,7 @@ int radGPU_PackGeometryForAsm(
         return 0;
     }
 
-    // --- Symmetry transforms ---
-    // Build all symmetry copies from the transform list of element 0
-    // In Radia, all elements in an interaction share the same symmetry structure
-    // TransPtrVect is populated by FillInTransPtrVectForElem
-//    memset(symData, 0, sizeof(RadGPU_SymData));
-//
-//    // Use intrct's own method to enumerate symmetry copies for element 0
-//    intrct->FillInTransPtrVectForElem(0, 'I');
-//    int nCopies = (int)intrct->TransPtrVect.size();
-//
-//    if(nCopies > RADGPU_MAX_SYM_COPIES) {
-//        fprintf(stderr, "GPU asm: too many symmetry copies (%d > %d)\n", nCopies, RADGPU_MAX_SYM_COPIES);
-//        intrct->EmptyTransPtrVect();
-//        return 0;
-//    }
-//
-//    symData->n_copies = nCopies;
-//
-//    // For field transforms: we need to know how the field transforms under each symmetry.
-//    // In the CPU code, TransPtrVect[i]->TrMatrix(SubMatrix) does the field transform.
-//    // And TransPtrVect[i]->TrPoint_inv(obs) does the point inverse transform.
-//    // For the GPU:
-//    //   point_transform: maps obs point from lab to this copy's frame (TrPoint_inv)
-//    //   field_transform: maps the computed field back to lab frame (TrMatrix)
-//
-//    for(int sc = 0; sc < nCopies; sc++) {
-//        radTrans* trPtr = intrct->TransPtrVect[sc];
-//        double* pt = &symData->point_transforms[sc * 9];
-//        double* ft = &symData->field_transforms[sc * 9];
-//
-//        // Extract point inverse transform matrix
-//        // TrPoint_inv(P) applies the inverse rotation
-//        // We extract by transforming unit vectors
-//        TVector3d zero(0,0,0);
-//        TVector3d o = trPtr->TrPoint_inv(zero);
-//        TVector3d ex(1,0,0), ey(0,1,0), ez(0,0,1);
-//        TVector3d tx = trPtr->TrPoint_inv(ex) - o;
-//        TVector3d ty = trPtr->TrPoint_inv(ey) - o;
-//        TVector3d tz = trPtr->TrPoint_inv(ez) - o;
-//
-//        // Point transform: column-major storage as row-major 3x3
-//        // P_transformed = M * P, so row i = how unit vector maps
-//        pt[0] = tx.x; pt[1] = ty.x; pt[2] = tz.x;
-//        pt[3] = tx.y; pt[4] = ty.y; pt[5] = tz.y;
-//        pt[6] = tx.z; pt[7] = ty.z; pt[8] = tz.z;
-//
-//        // Extract field transform matrix
-//        // TrMatrix(M) transforms a 3x3 matrix: result = R * M * R^T
-//        // For a vector field: B_lab = R * B_local
-//        // Extract R by transforming unit matrices
-//        TMatrix3d unitX(TVector3d(1,0,0), TVector3d(0,0,0), TVector3d(0,0,0));
-//        TMatrix3d unitY(TVector3d(0,0,0), TVector3d(0,1,0), TVector3d(0,0,0));
-//        TMatrix3d unitZ(TVector3d(0,0,0), TVector3d(0,0,0), TVector3d(0,0,1));
-//
-//        // Actually, TrVectField gives us what we need directly:
-//        TVector3d fx = trPtr->TrVectField(ex);
-//        TVector3d fy = trPtr->TrVectField(ey);
-//        TVector3d fz = trPtr->TrVectField(ez);
-//
-//        ft[0] = fx.x; ft[1] = fy.x; ft[2] = fz.x;
-//        ft[3] = fx.y; ft[4] = fy.y; ft[5] = fz.y;
-//        ft[6] = fx.z; ft[7] = fy.z; ft[8] = fz.z;
-//    }
-//
-//    intrct->EmptyTransPtrVect();
-//    fprintf(stderr, "GPU asm pack: %d symmetry copies\n", nCopies);
-
-      // --- Per-element symmetry transforms ---
+    // --- Per-element symmetry transforms ---
     memset(symData, 0, sizeof(RadGPU_SymData));
     symData->n_elem = N;
 
@@ -373,8 +236,6 @@ int radGPU_PackGeometryForAsm(
 
         intrct->EmptyTransPtrVect();
     }
-
-    fprintf(stderr, "GPU asm pack: %d elements, %d total symmetry copies\n", N, totalCopies);
 
     return 1;
 }

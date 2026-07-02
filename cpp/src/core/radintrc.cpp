@@ -531,6 +531,7 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 			{
 				radGPU_FreeAsmData(&polyData, &recData, &result);
 				radGPU_FreeSymData(&symData);
+				Send.WarningMessage("Radia::Warning021"); //GPU assembly could not complete (e.g. out of GPU memory or unimplemented element kernel); falling back to CPU
 			}
 		}
 	}
