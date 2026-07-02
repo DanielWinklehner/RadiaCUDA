@@ -2,3 +2,4 @@
 /playground/
 /.claude/
 /.idea/
+__pycache__/
