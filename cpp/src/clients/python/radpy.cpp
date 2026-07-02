@@ -2389,13 +2389,29 @@ static PyObject* radia_Fld(PyObject* self, PyObject* args, PyObject* kwargs)
 {
 	PyObject *oCmpnId=0, *oP=0, *oResB=0;
 	double *arCoord=0, *arB=0;
-	static char *kwlist[] = {(char*)"obj", (char*)"id", (char*)"points", (char*)"use_gpu", NULL};
+	static char *kwlist[] = {(char*)"obj", (char*)"id", (char*)"points", (char*)"use_gpu", (char*)"precision", NULL};
 	try
 	{
 		int ind=0;
 		int use_gpu=1;
-		if(!PyArg_ParseTupleAndKeywords(args, kwargs, "iOO|p:Fld", kwlist, &ind, &oCmpnId, &oP, &use_gpu)) throw CombErStr(strEr_BadFuncArg, ": Fld");
+		const char *sPrecision=0;
+		if(!PyArg_ParseTupleAndKeywords(args, kwargs, "iOO|ps:Fld", kwlist, &ind, &oCmpnId, &oP, &use_gpu, &sPrecision)) throw CombErStr(strEr_BadFuncArg, ": Fld");
 		if((ind == 0) || (oCmpnId == 0) || (oP == 0)) throw CombErStr(strEr_BadFuncArg, ": Fld");
+
+		// precision='single' selects the fp32 GPU polygon-face kernel
+		// (use_gpu code 2: visualization-grade accuracy, much faster on
+		// GeForce-class GPUs); 'double' (default) keeps the exact fp64
+		// kernel. Only meaningful together with use_gpu=True.
+		if(sPrecision != 0 && *sPrecision != '\0')
+		{
+			if(strcmp(sPrecision, "single") == 0 || strcmp(sPrecision, "float") == 0 ||
+			   strcmp(sPrecision, "fp32") == 0)
+			{
+				if(use_gpu) use_gpu = 2;
+			}
+			else if(strcmp(sPrecision, "double") != 0 && strcmp(sPrecision, "fp64") != 0)
+				throw CombErStr(strEr_BadFuncArg, ": Fld: precision must be 'double' or 'single'");
+		}
 
 		char sCmpnId[256];
 		CPyParse::CopyPyStringToC(oCmpnId, sCmpnId, 256);
@@ -3326,7 +3342,7 @@ static PyMethodDef radia_methods[] = {
 	{"RlxUpdSrc", radia_RlxUpdSrc, METH_VARARGS, "RlxUpdSrc(intrc) updates external field data for the relaxation (to take into account e.g. modification of currents in coils, if any) without rebuilding the interaction matrix."},
 	{"Solve", radia_Solve, METH_VARARGS, "Solve(obj,prec,maxiter,meth:4) solves a magnetostatic problem, i.e. builds an interaction matrix for the object obj and performs a relaxation procedure using the method number meth (default is 4, use 9 for CUDA-accelerated). The relaxation stops whenever the change in magnetization (averaged over all sub-elements) between two successive iterations is smaller than prec or the number of iterations is larger than maxiter."},
 
-	{"Fld", (PyCFunction)radia_Fld, METH_VARARGS | METH_KEYWORDS,  "Fld(obj,id,points,use_gpu=True) computes magnetic field at one or many points"},
+	{"Fld", (PyCFunction)radia_Fld, METH_VARARGS | METH_KEYWORDS,  "Fld(obj,id,points,use_gpu=True,precision='double') computes magnetic field at one or many points. precision='single' runs the GPU polygon-face kernel in fp32 (visualization-grade accuracy, much faster on GeForce-class GPUs); only B-field component ids b/bx/by/bz take the GPU path."},
 	{"FldLst", radia_FldLst, METH_VARARGS,  "FldLst(obj,'bx|by|bz|hx|hy|hz|ax|ay|az|mx|my|mz'|'',[x1,y1,z1],[x2,y2,z2],np,'arg|noarg':'noarg',strt:0.) computes magnetic field created by object obj in np equidistant points along a line segment from [x1,y1,z1] to [x2,y2,z2]; the field component is specified by the second input variable; the 'arg|noarg' string variable specifies whether to output a longitudinal position for each point where the field is computed, and strt gives the start-value for the longitudinal position."},
 	{"FldInt", radia_FldInt, METH_VARARGS, "FldInt(obj,'inf|fin','ibx|iby|ibz'|'',[x1,y1,z1],[x2,y2,z2]) computes magnetic field induction integral produced by the object obj along a straight line specified by points [x1,y1,z1] and [x2,y2,z2]; depending on the second variable value, the integral is infinite ('inf') or finite from [x1,y1,z1] to [x2,y2,z2] ('fin'); the field integral component is specified by the third input variable. The units are Tesla x millimeters."},
 	{"FldPtcTrj", radia_FldPtcTrj, METH_VARARGS, "FldPtcTrj(obj,E,[x0,dxdy0,z0,dzdy0],[y0,y1],np) computes transverse coordinates and its derivatives (angles) of a relativistic charged particle trajectory in 3D magnetic field produced by the object obj, using the 4th order Runge-Kutta integration. The particle energy is E [GeV], initial transverse coordinates and derivatives are {x0,dxdy0,z0,dzdy0}; the longitudinal coordinate y is varied from y0 to y1 in np steps. All positions are in millimeters and angles in radians."},

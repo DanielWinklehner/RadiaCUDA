@@ -757,6 +757,7 @@ int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int us
                 fData.n_faces_total = nFaces;
                 fData.n_obs = nP;
                 fData.n_src_blocks = (nFaces + RADGPU_FLD_BLOCK_SIZE - 1) / RADGPU_FLD_BLOCK_SIZE;
+                fData.use_fp32 = (use_gpu >= 2) ? 1 : 0;  // 2 = fp32 face kernel
 
                 size_t v2d_count = (size_t)nFaces * RADGPU_FLD_MAX_VERTS * 2;
                 fData.h_verts2d = new double[v2d_count]();

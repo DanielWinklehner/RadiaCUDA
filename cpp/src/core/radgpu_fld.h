@@ -77,6 +77,10 @@ struct RadGPUFieldFaceData
     double* d_result_B;
     double* h_result_B;
 
+    // Evaluate the face integrals in fp32 (visualization-grade accuracy at
+    // much higher throughput on GeForce-class GPUs). 0 = fp64 (default).
+    int use_fp32;
+
     RadGPUFieldFaceData()
         : h_verts2d(nullptr), d_verts2d(nullptr)
         , h_nverts(nullptr), d_nverts(nullptr)
@@ -92,6 +96,7 @@ struct RadGPUFieldFaceData
         , n_src_blocks(0)
         , d_result_B(nullptr)
         , h_result_B(nullptr)
+        , use_fp32(0)
     {}
 };
 
@@ -170,6 +175,9 @@ int radGPU_FldRecMagRetrieveAndFree(RadGPUFieldRecMagData* data);
 //
 // Packs geometry from Radia's internal structures, launches GPU kernel
 // for magnetized elements, then adds CPU-computed coil contributions.
+//
+// use_gpu: 0 = CPU (caller should not call), 1 = GPU fp64 (default),
+//          2 = GPU with the fp32 polygon-face kernel (visualization-grade).
 //
 // Returns 0 on success, nonzero on failure (caller should fall back to CPU).
 //-------------------------------------------------------------------------
