@@ -2412,10 +2412,17 @@ static PyObject* radia_Fld(PyObject* self, PyObject* args, PyObject* kwargs)
 		int nB = 0;
 		g_pyParse.ProcRes(RadFld(arB, &nB, ind, sCmpnId, arCoord, nP, use_gpu));
 
-		if(nB <= 0) { nB = 1; *arB = 0;} //OC10012020 (to ensure some dummy return, e.g. in the case of MPI, rank > 0)
-
-		if(nB == 1) oResB = Py_BuildValue("d", *arB);
-		else if(nB > 1) oResB = CPyParse::SetDataListOfLists(arB, nB, nP);
+		// Under MPI, RadFld returns no data on non-root ranks (nB <= 0); return Python None
+		// there (consistently for both the CPU and GPU field paths) so callers can reliably
+		// test `result is None` to skip non-root ranks. A genuine single-value result
+		// (nB == 1, e.g. one scalar component at one point on rank 0) still returns a float.
+		if(nB <= 0)
+		{
+			Py_INCREF(Py_None);
+			oResB = Py_None;
+		}
+		else if(nB == 1) oResB = Py_BuildValue("d", *arB);
+		else oResB = CPyParse::SetDataListOfLists(arB, nB, nP);
 	}
 	catch(const char* erText) 
 	{

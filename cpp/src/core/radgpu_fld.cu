@@ -18,6 +18,7 @@
 #include "radgpu_fld.h"
 #include <cuda_runtime.h>
 #include <cstdio>
+#include <cstdlib>   // getenv, atol
 #include <cmath>
 #include <vector>
 
@@ -413,6 +414,46 @@ void radGPU_FldReduceKernel(
     result_B[obs_idx * 3 + 0] = Bx;
     result_B[obs_idx * 3 + 1] = By;
     result_B[obs_idx * 3 + 2] = Bz;
+}
+
+//-------------------------------------------------------------------------
+// Choose the largest observation-point chunk that fits in VRAM (issue #12).
+// perObs = (n_src_blocks + 2) * 3 doubles  (partial_B + obs + result per point).
+// Uses 85% of currently-free VRAM as a margin for fragmentation/other allocations.
+// Test hook: env var RADIA_GPU_FLD_MAX_OBS_CHUNK, if set to a positive integer,
+// further clamps the chunk so the chunking path can be exercised deterministically
+// on a small observation grid.
+//-------------------------------------------------------------------------
+int radGPU_FldMaxObsChunk(int n_src_blocks, size_t geom_bytes, int n_obs_total)
+{
+    if (n_obs_total <= 0) return 1;
+    int cap = n_obs_total; // default: no VRAM-driven chunking
+
+    size_t freeB = 0, totalB = 0;
+    if (cudaMemGetInfo(&freeB, &totalB) == cudaSuccess)
+    {
+        size_t budget = (size_t)((double)freeB * 0.85);
+        size_t perObs = (size_t)(n_src_blocks + 2) * 3 * sizeof(double);
+        if (perObs == 0 || budget <= geom_bytes)
+        {
+            cap = 1; // geometry alone is tight: try one point at a time
+        }
+        else
+        {
+            unsigned long long c = (unsigned long long)((budget - geom_bytes) / perObs);
+            if (c < (unsigned long long)cap) cap = (c < 1) ? 1 : (int)c;
+        }
+    }
+
+    // Test hook (issue #12): force a smaller chunk to exercise the chunking path.
+    const char* env = getenv("RADIA_GPU_FLD_MAX_OBS_CHUNK");
+    if (env && *env)
+    {
+        long v = atol(env);
+        if (v >= 1 && v < (long)cap) cap = (int)v;
+    }
+
+    return (cap < 1) ? 1 : cap;
 }
 
 //-------------------------------------------------------------------------

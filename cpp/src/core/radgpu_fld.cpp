@@ -717,9 +717,28 @@ int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int us
                     memcpy(&rmData.h_rot[r * 9], ri.rot, 9 * sizeof(double));
                 }
 
-                int rc = radGPU_FldRecMagAllocAndCopy(&rmData);
-                if (rc == 0) rc = radGPU_FldRecMagLaunchKernel(&rmData);
-                if (rc == 0) rc = radGPU_FldRecMagRetrieveAndFree(&rmData);
+                // Chunk observation points so the O(n_obs * n_recmags) partial buffer
+                // stays within VRAM (issue #12). Chunk size is maximized: fewer, larger
+                // launches mean less overhead and better GPU occupancy.
+                size_t rmGeomBytes =
+                      (size_t)nRecMags * 3 * sizeof(double)   // centers
+                    + (size_t)nRecMags * 3 * sizeof(double)   // dims
+                    + (size_t)nRecMags * 3 * sizeof(double)   // mag
+                    + (size_t)nRecMags * 9 * sizeof(double);  // rot
+                int obsChunk = radGPU_FldMaxObsChunk(rmData.n_src_blocks, rmGeomBytes, nP);
+
+                int rc = 0;
+                for (int off = 0; off < nP && rc == 0; off += obsChunk)
+                {
+                    int cObs = (nP - off < obsChunk) ? (nP - off) : obsChunk;
+                    rmData.n_obs = cObs;
+                    rmData.h_obs = arCoord + (size_t)off * 3;
+                    rmData.h_result_B = arB + (size_t)off * 3;
+
+                    rc = radGPU_FldRecMagAllocAndCopy(&rmData);
+                    if (rc == 0) rc = radGPU_FldRecMagLaunchKernel(&rmData);
+                    if (rc == 0) rc = radGPU_FldRecMagRetrieveAndFree(&rmData);
+                }
 
                 delete[] rmData.h_centers;
                 delete[] rmData.h_dims;
@@ -768,9 +787,30 @@ int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int us
                 }
 
 
-               int rc = radGPU_FldAllocAndCopy(&fData);
-               if (rc == 0) rc = radGPU_FldLaunchKernel(&fData);
-               if (rc == 0) rc = radGPU_FldRetrieveAndFree(&fData);
+                // Chunk observation points to bound the O(n_obs * n_faces) partial
+                // buffer (issue #12); chunk size is maximized for efficiency.
+                size_t fGeomBytes =
+                      (size_t)nFaces * RADGPU_FLD_MAX_VERTS * 2 * sizeof(double) // verts2d
+                    + (size_t)nFaces * sizeof(int)                              // nverts
+                    + (size_t)nFaces * sizeof(double)                           // coordz
+                    + (size_t)nFaces * 9 * sizeof(double)                       // transform
+                    + (size_t)nFaces * 9 * sizeof(double)                       // inv_transform
+                    + (size_t)nFaces * 3 * sizeof(double)                       // origin
+                    + (size_t)nFaces * 3 * sizeof(double);                      // mag
+                int obsChunk = radGPU_FldMaxObsChunk(fData.n_src_blocks, fGeomBytes, nP);
+
+                int rc = 0;
+                for (int off = 0; off < nP && rc == 0; off += obsChunk)
+                {
+                    int cObs = (nP - off < obsChunk) ? (nP - off) : obsChunk;
+                    fData.n_obs = cObs;
+                    fData.h_obs = arCoord + (size_t)off * 3;
+                    fData.h_result_B = polyB + (size_t)off * 3;
+
+                    rc = radGPU_FldAllocAndCopy(&fData);
+                    if (rc == 0) rc = radGPU_FldLaunchKernel(&fData);
+                    if (rc == 0) rc = radGPU_FldRetrieveAndFree(&fData);
+                }
 
                 // Add polygon contribution to total
                 if (rc == 0)

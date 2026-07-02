@@ -1025,6 +1025,30 @@ EXP int CALL RadRlxUpdSrc(int intrc)
 // diagnostics / testing of the GPU path and its CPU fallback.
 static int g_LastFldBackend = -1;
 
+#ifdef _WITH_MPI
+#include <mpi.h>
+#endif
+
+// Under MPI, field evaluation yields a valid result only on rank 0 (the GPU path computes
+// on rank 0 and broadcasts only success/failure; the CPU path likewise leaves the output
+// buffer empty on non-root). This returns the process's MPI rank (0 when MPI is not
+// initialized or not built in), so RadFld can report "no data" (*pNb = 0) on non-root
+// ranks -> Python None, consistently across both field paths.
+static int radFldMpiRank()
+{
+#ifdef _WITH_MPI
+    int inited = 0;
+    MPI_Initialized(&inited);
+    if(inited)
+    {
+        int r = 0;
+        MPI_Comm_rank(MPI_COMM_WORLD, &r);
+        return r;
+    }
+#endif
+    return 0;
+}
+
 int CALL RadFld(double* pB, int* pNb, int Obj, char* ID, double* pCoord, int Np, int use_gpu)
 {
 #ifdef RADIA_WITH_CUDA
@@ -1047,6 +1071,17 @@ int CALL RadFld(double* pB, int* pNb, int Obj, char* ID, double* pCoord, int Np,
 
             if(gpuRC == 0)
             {
+                if(radFldMpiRank() != 0)
+                {
+                    // Non-root under MPI: radGPU_ComputeField computed the field on rank 0
+                    // only. Report no data (-> Python None) instead of Np*3 zeros, matching
+                    // the CPU path so Fld's return is consistent across ranks and backends.
+                    *pNb = 0;
+                    g_LastFldBackend = 1;
+                    delete[] arBfull;
+                    return 0;
+                }
+
                 if(strcmp(ID, "b") == 0 || strcmp(ID, "B") == 0)
                 {
                     memcpy(pB, arBfull, Np * 3 * sizeof(double));

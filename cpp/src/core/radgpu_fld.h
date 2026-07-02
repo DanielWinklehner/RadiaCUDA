@@ -13,6 +13,8 @@
 
 #ifdef RADIA_WITH_CUDA
 
+#include <cstddef>   // size_t
+
 //-------------------------------------------------------------------------
 // Maximum vertices per polygon face.
 // Matches the constraint in radgpu_asm: polyhedron faces rarely exceed 6.
@@ -100,6 +102,12 @@ struct RadGPUFieldFaceData
 int radGPU_FldLaunchKernel(RadGPUFieldFaceData* data);
 int radGPU_FldAllocAndCopy(RadGPUFieldFaceData* data);
 int radGPU_FldRetrieveAndFree(RadGPUFieldFaceData* data);
+
+// Largest observation-point chunk whose per-chunk device buffers
+// (partial_B + obs + result) fit alongside the resident geometry within a
+// safety fraction of currently-free VRAM. Returns >=1 and <= n_obs_total.
+// Bounds the O(n_obs * n_faces) partial buffer (issue #12).
+int radGPU_FldMaxObsChunk(int n_src_blocks, size_t geom_bytes, int n_obs_total);
 
 
 //-------------------------------------------------------------------------

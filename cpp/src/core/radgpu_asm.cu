@@ -454,6 +454,26 @@ int radGPU_AssembleMatrix(
 
     long long totalPairs = (long long)N * N;
 
+    // Pre-flight VRAM check (issue #13): the dense interaction matrix on the device
+    // (d_out = totalPairs*9 floats = 36*N^2 bytes) dominates GPU memory. If it won't fit in
+    // free VRAM (with a margin for the smaller geometry/symmetry buffers), skip GPU assembly
+    // up front so the caller (radTInteraction::SetupInteractMatrix) falls back to CPU and
+    // warns -- rather than allocating a 36*N^2 host buffer and then failing a huge cudaMalloc.
+    {
+        size_t freeB = 0, totalB = 0;
+        if(cudaMemGetInfo(&freeB, &totalB) == cudaSuccess)
+        {
+            double needBytes = (double)totalPairs * 9.0 * sizeof(float) * 1.15; // +15% geom/sym
+            if(needBytes > (double)freeB * 0.90)
+            {
+                fprintf(stderr, "GPU assembly: interaction matrix needs ~%.2f GB but only "
+                                "%.2f GB VRAM free (N=%d); using CPU.\n",
+                        needBytes / 1073741824.0, (double)freeB / 1073741824.0, N);
+                return -1;
+            }
+        }
+    }
+
     // Allocate output (host). This dense matrix is N*N*9 floats; use nothrow so a
     // too-large request reports cleanly instead of throwing std::bad_alloc.
     result->N = N;

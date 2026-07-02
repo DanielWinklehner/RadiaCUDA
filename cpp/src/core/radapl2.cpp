@@ -1370,11 +1370,23 @@ case 8:
 #ifdef RADIA_WITH_CUDA
 		case 9:
 		{
-			ActualIterNum = radGPU_AutoRelax(InteractPtr, PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded, gpuOmega);
-			if(ActualIterNum < 0)
+			// #9: the GPU solver flattens all elements and does not implement the staged
+			// (RelaxTogether/RelaxApart) sub-interval relaxation. If the model uses it, run
+			// the CPU staged solver (method 5's a5) -- the correct path -- not the GPU.
+			if(InteractPtr->AmOfRelaxSubInterv != 0)
 			{
-				radTRelaxationMethNo_4 FallbackMeth4(InteractPtr);
-				ActualIterNum = FallbackMeth4.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded);
+				Send.WarningMessage("Radia::Warning023");
+				radTRelaxationMethNo_a5 RelaxMethNo_a5(InteractPtr);
+				ActualIterNum = RelaxMethNo_a5.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded);
+			}
+			else
+			{
+				ActualIterNum = radGPU_AutoRelax(InteractPtr, PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded, gpuOmega);
+				if(ActualIterNum < 0)
+				{
+					radTRelaxationMethNo_4 FallbackMeth4(InteractPtr);
+					ActualIterNum = FallbackMeth4.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded);
+				}
 			}
 		}
 		break;
