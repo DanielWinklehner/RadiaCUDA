@@ -415,6 +415,28 @@ public:
 //-------------------------------------------------------------------------
 //-------------------------------------------------------------------------
 
+class radTRelaxationMethNo_10 : public radTIterativeRelaxMeth {
+//CPU implementation of the RadiaCUDA GPU relaxation (radgpurlx.cu): Jacobi
+//iteration with implicit per-element solve and adaptive under-relaxation
+//(omega with a ratcheting ceiling). Converges on strongly-coupled saturating
+//models where the Gauss-Seidel scheme of method 4 limit-cycles; used as the
+//CPU counterpart / fallback of method 9 (e.g. MPI cluster builds without CUDA).
+
+	double mInstMisfitMe2;
+
+public:
+
+	radTRelaxationMethNo_10(radTInteraction* InInteractionPtr) : radTIterativeRelaxMeth(InInteractionPtr)
+	{
+		mInstMisfitMe2 = 1.E+23;
+	}
+
+	int AutoRelax(double PrecOnMagnetiz, int MaxIterNumber, char MagnResetIsNotNeeded=0, double Omega=-1.);
+};
+
+//-------------------------------------------------------------------------
+//-------------------------------------------------------------------------
+
 class radTRelaxationMethNo_a5 : public radTIterativeRelaxMeth {
 	double InstMisfitM;
 	double** AuxMatr1;
@@ -667,6 +689,7 @@ public:
 
 #ifdef RADIA_WITH_CUDA
 int radGPU_AutoRelax(radTInteraction* IntrctPtr, double PrecOnMagnetiz, int MaxIterNumber, char MagnResetIsNotNeeded=0, double omega=-1.0);
+int radGPU_AutoRelaxNK(radTInteraction* IntrctPtr, double PrecOnMagnetiz, int MaxIterNumber, char MagnResetIsNotNeeded=0, double omega=-1.0);
 #endif
 
 #endif

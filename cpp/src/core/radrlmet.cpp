@@ -19,6 +19,8 @@
 #include "radyield.h"
 
 #include <time.h>
+#include <cstdlib>
+#include <vector>
 
 //-------------------------------------------------------------------------
 
@@ -1142,6 +1144,371 @@ int radTRelaxationMethNo_8::AutoRelax(double PrecOnMagnetiz, int MaxIterNumber, 
 **/
 
 	return ItCnt;
+}
+
+//-------------------------------------------------------------------------
+
+//Small regularized normal-equations solve for the Anderson mixing
+//coefficients (mirrors solve_small_ls in radgpurlx.cu). Returns 0 on a
+//degenerate pivot.
+static int radAndersonSolveLS(double* G, double* b, double* gamma, int n)
+{
+	double maxDiag = 0.;
+	for(int i=0; i<n; i++) if(G[i*n+i] > maxDiag) maxDiag = G[i*n+i];
+	double lambda = 1.e-10*((maxDiag > 0.)? maxDiag : 1.);
+	for(int i=0; i<n; i++) G[i*n+i] += lambda;
+
+	for(int k=0; k<n; k++)
+	{
+		int piv = k;
+		for(int i=k+1; i<n; i++) if(fabs(G[i*n+k]) > fabs(G[piv*n+k])) piv = i;
+		if(fabs(G[piv*n+k]) < 1.e-300) return 0;
+		if(piv != k)
+		{
+			for(int j=0; j<n; j++) { double t = G[k*n+j]; G[k*n+j] = G[piv*n+j]; G[piv*n+j] = t; }
+			double t = b[k]; b[k] = b[piv]; b[piv] = t;
+		}
+		for(int i=k+1; i<n; i++)
+		{
+			double f = G[i*n+k]/G[k*n+k];
+			for(int j=k; j<n; j++) G[i*n+j] -= f*G[k*n+j];
+			b[i] -= f*b[k];
+		}
+	}
+	for(int i=n-1; i>=0; i--)
+	{
+		double s = b[i];
+		for(int j=i+1; j<n; j++) s -= G[i*n+j]*gamma[j];
+		gamma[i] = s/G[i*n+i];
+	}
+	return 1;
+}
+
+int radTRelaxationMethNo_10::AutoRelax(double PrecOnMagnetiz, int MaxIterNumber, char MagnResetIsNotNeeded, double Omega)
+{
+//CPU port of the GPU relaxation loop (radgpurlx.cu, radGPU_RelaxAuto): an
+//under-relaxed JACOBI iteration -- every element's quasi-external field is
+//computed from the magnetizations of the PREVIOUS pass -- with the implicit
+//per-element solve of methods 3/8 ((E - Ksi(H)*Qii)^-1 linearization at the
+//element's persistent H) and the same adaptive omega scheme as the GPU:
+//grow 1.01x per converging pass up to a ceiling that ratchets down 0.95x
+//after two consecutive diverging passes (and recovers after sustained
+//convergence). The reported misfit is the mean UNDAMPED proposal step
+//|M_proposed - M_old| (the iteration map's fixed-point residual), matching
+//the GPU solver and the meaning of method 4's misfit -- NOT the omega-damped
+//applied step, which under-reports the distance to the solution by the
+//omega factor.
+	if(IntrctPtr == 0) return 0;
+	int LocAmOfMainElem = IntrctPtr->AmOfMainElem;
+	if(LocAmOfMainElem <= 0) return 0;
+
+	double DesiredPrecOnMagnetizE2 = PrecOnMagnetiz*PrecOnMagnetiz;
+
+	if(!MagnResetIsNotNeeded)
+	{
+		IntrctPtr->ResetM();
+	}
+	IntrctPtr->ResetAuxParam();
+
+	TMatrix3df** IntrcMat = IntrctPtr->InteractMatrix;
+	TVector3d* MagnAr = IntrctPtr->NewMagnArray;
+	TVector3d* ExternFieldAr = IntrctPtr->ExternFieldArray;
+	TVector3d* NewFieldAr = IntrctPtr->NewFieldArray;
+
+	TVector3d* PropMagnAr = new TVector3d[LocAmOfMainElem];
+	if(PropMagnAr == 0) return 0;
+
+	TVector3d E_Str0(1.,0.,0.), E_Str1(0.,1.,0.), E_Str2(0.,0.,1.);
+	TMatrix3d E(E_Str0, E_Str1, E_Str2), BufMatr, InvBufMatr;
+	TMatrix3d MultByInstKsi;
+	TVector3d MultByInstMr;
+
+	double CurOmega = (Omega > 0.)? Omega : 0.3;
+	double OmegaCeiling = 1.;      //upper bound, ratchets down
+	const double OmegaMin = 0.05;
+	double PrevMisfitMe2 = 1.E+30;
+	double BestMisfitMe2 = 1.E+30;
+	int DivergeCount = 0;
+	int ConvergeStreak = 0;
+	int SinceBest = 0;
+	int OmegaResets = 0;
+	int IterDone = 0;
+	double NormFact = 1./double(LocAmOfMainElem);
+
+	//Anderson-acceleration state (mirrors radgpurlx.cu, same env switches:
+	//RADIA_NO_ANDERSON disables, RADIA_ANDERSON_M / RADIA_ANDERSON_BETA tune).
+	//AndersonBeta <= 0 means AUTO: use the current adaptive omega (plain
+	//Jacobi on these maps is unstable at omega ~ O(1); see radgpurlx.cu).
+	//Default OFF (opt in with RADIA_ANDERSON=1), matching the GPU path:
+	//benchmarked 2.7-3x fewer iterations to the same endpoint on
+	//well-conditioned models, but on ill-conditioned production meshes the
+	//accelerated iteration stalls at a HIGHER misfit floor than the plain
+	//damped one -- not ready as a default.
+	int AndersonM = 5; double AndersonBeta = -1.; bool AndersonEnabled = false;
+	{
+		const char* e = getenv("RADIA_ANDERSON");
+		if(e && *e && *e != '0') AndersonEnabled = true;
+		e = getenv("RADIA_NO_ANDERSON");
+		if(e && *e && *e != '0') AndersonEnabled = false;
+		e = getenv("RADIA_ANDERSON_M");
+		if(e && *e) { int v = atoi(e); if(v >= 1 && v <= 8) AndersonM = v; }
+		e = getenv("RADIA_ANDERSON_BETA");
+		if(e && *e) { double v = atof(e); if(v > 0. && v <= 1.) AndersonBeta = v; }
+	}
+	const int AndersonWarmup = 20, AndersonCooloff = 20, AndersonMaxBlowups = 10;
+	std::vector<std::vector<TVector3d> > dFHist((size_t)AndersonM,
+		std::vector<TVector3d>((size_t)LocAmOfMainElem));
+	std::vector<std::vector<TVector3d> > dXHist((size_t)AndersonM,
+		std::vector<TVector3d>((size_t)LocAmOfMainElem));
+	std::vector<TVector3d> FVect((size_t)LocAmOfMainElem);
+	std::vector<TVector3d> FPrev((size_t)LocAmOfMainElem);
+	std::vector<TVector3d> XPrev((size_t)LocAmOfMainElem);
+	int HistLen = 0, Cooloff = 0, Blowups = 0;
+	bool HavePrev = false;
+	//Anderson's own damping controller, separate from omega (see radgpurlx.cu).
+	double AndersonBetaCur = (AndersonBeta > 0.)? AndersonBeta : 0.3;
+	bool LastAnderson = false;
+
+	for(int Iter=0; Iter<MaxIterNumber; Iter++)
+	{
+		//Jacobi pass: quasi-external field of every element from the CURRENT
+		//magnetizations, then the implicit per-element solve; proposed new
+		//magnetizations are collected in PropMagnAr (MagnAr untouched until
+		//the whole pass is done).
+		for(int StrNo=0; StrNo<LocAmOfMainElem; StrNo++)
+		{
+			TMatrix3df* MatrRow = IntrcMat[StrNo];
+
+			TVector3d QuasiExtFieldAtElemStrNo(0.,0.,0.);
+			for(int ColNo=0; ColNo<LocAmOfMainElem; ColNo++)
+				if(ColNo!=StrNo) QuasiExtFieldAtElemStrNo += MatrRow[ColNo] * MagnAr[ColNo];
+			QuasiExtFieldAtElemStrNo += ExternFieldAr[StrNo];
+
+			radTg3dRelax* g3dRelaxPtr = IntrctPtr->g3dRelaxPtrVect[StrNo];
+			radTMaterial* MaterPtr = (radTMaterial*)(g3dRelaxPtr->MaterHandle.rep);
+
+			//Damped inner fixed-point solve of the per-element implicit
+			//equation (the GPU kernel iterates its linearization up to 15x
+			//with adaptive mixing; a single linearization step -- as this
+			//port originally did -- makes the PROPOSALS of strongly
+			//saturating elements limit-cycle, which after the undamped-step
+			//misfit fix would show up as a large, never-converging misfit
+			//even though the applied state is fine).
+			for(int InnerIt=0; InnerIt<15; InnerIt++)
+			{
+				MaterPtr->MultMatrByInstKsiAndMr(NewFieldAr[StrNo], MatrRow[StrNo], MultByInstKsi, MultByInstMr);
+				BufMatr = E - MultByInstKsi;
+				Matrix3d_inv(BufMatr, InvBufMatr);
+				TVector3d Hnew = InvBufMatr * (MultByInstMr + QuasiExtFieldAtElemStrNo);
+				TVector3d dH = Hnew - NewFieldAr[StrNo];
+				NewFieldAr[StrNo] += 0.5*dH;
+				if(dH.AmpE2() <= 1.E-18*(1. + Hnew.AmpE2())) break;
+			}
+
+			PropMagnAr[StrNo] = MaterPtr->M(NewFieldAr[StrNo]);
+		}
+
+		//Fixed-point residual F = M_proposed - M: the UNDAMPED proposal
+		//step (same meaning as method 4's misfit / the GPU kernel).
+		double BufMisfitM = 0.;
+		for(int StrNo=0; StrNo<LocAmOfMainElem; StrNo++)
+		{
+			FVect[StrNo] = PropMagnAr[StrNo] - MagnAr[StrNo];
+			TVector3d& F = FVect[StrNo];
+			BufMisfitM += F.x*F.x + F.y*F.y + F.z*F.z;
+		}
+		double NewMisfitMe2 = BufMisfitM*NormFact;
+		IterDone = Iter + 1;
+
+		//Anderson blow-up safeguard: REVERT to the pre-step state, drop the
+		//history, cool off with plain damped passes (mirrors the GPU loop).
+		if(HavePrev && HistLen > 0 && NewMisfitMe2 > 1.5*mInstMisfitMe2)
+		{
+			for(int StrNo=0; StrNo<LocAmOfMainElem; StrNo++)
+			{
+				MagnAr[StrNo] = XPrev[StrNo];
+				IntrctPtr->g3dRelaxPtrVect[StrNo]->Magn = MagnAr[StrNo];
+			}
+			HistLen = 0; HavePrev = false; LastAnderson = false;
+			Cooloff = AndersonCooloff;
+			AndersonBetaCur *= 0.5;
+			if(AndersonBetaCur < 0.05) AndersonBetaCur = 0.05;
+			if(++Blowups >= AndersonMaxBlowups) AndersonEnabled = false;
+			continue;
+		}
+		//Anderson beta feedback: grow while accelerated steps improve the
+		//misfit, back off gently when they don't (mirrors radgpurlx.cu).
+		if(LastAnderson)
+		{
+			AndersonBetaCur *= (NewMisfitMe2 < mInstMisfitMe2)? 1.01 : 0.95;
+			if(AndersonBetaCur > 1.) AndersonBetaCur = 1.;
+			if(AndersonBetaCur < 0.05) AndersonBetaCur = 0.05;
+		}
+		mInstMisfitMe2 = NewMisfitMe2;
+
+		if(mInstMisfitMe2 <= DesiredPrecOnMagnetizE2) break;
+
+		//Stagnation handling (as in radgpurlx.cu): first stagnation resets
+		//the omega state (a pinned omega can stall progress a fresh
+		//schedule would resume); a second stagnation with fresh omega is a
+		//genuine floor -- stop instead of burning the budget.
+		if(mInstMisfitMe2 < BestMisfitMe2*0.9999)
+		{
+			BestMisfitMe2 = mInstMisfitMe2; SinceBest = 0; OmegaResets = 0;
+			if(Blowups > 0) Blowups--;  //progress amnesty
+		}
+		else if(++SinceBest >= 2000)
+		{
+			if(OmegaResets >= 1) break;
+			CurOmega = (Omega > 0.)? Omega : 0.3;
+			OmegaCeiling = 1.;
+			DivergeCount = 0; ConvergeStreak = 0;
+			PrevMisfitMe2 = 1.E+30;
+			SinceBest = 0;
+			OmegaResets++;
+		}
+
+		if(radYield.Check()==0) { delete[] PropMagnAr; return 0;}
+
+		//Adaptive omega with ratcheting ceiling (as in radgpurlx.cu); the
+		//ceiling recovers after sustained convergence so noise-driven
+		//ratcheting cannot pin omega at OmegaMin permanently. Runs ONLY
+		//after plain passes: Anderson's misfit sequence is legitimately
+		//non-monotonic and would ratchet omega into the floor.
+		if(!LastAnderson)
+		if(mInstMisfitMe2 < PrevMisfitMe2)
+		{
+			DivergeCount = 0;
+			CurOmega *= 1.01;
+			if(CurOmega > OmegaCeiling) CurOmega = OmegaCeiling;
+			if(++ConvergeStreak >= 20 && OmegaCeiling < 1.)
+			{
+				OmegaCeiling *= 1.01;
+				if(OmegaCeiling > 1.) OmegaCeiling = 1.;
+			}
+		}
+		else
+		{
+			ConvergeStreak = 0;
+			if(++DivergeCount >= 2)
+			{
+				OmegaCeiling = CurOmega*0.95;
+				CurOmega *= 0.8;
+				if(CurOmega < OmegaMin) CurOmega = OmegaMin;
+				if(OmegaCeiling < OmegaMin) OmegaCeiling = OmegaMin;
+				DivergeCount = 0;
+			}
+		}
+		PrevMisfitMe2 = mInstMisfitMe2;
+
+		//Apply the update: Anderson type-II mixing when history is
+		//available, plain damped Jacobi otherwise (mirrors the GPU loop).
+		bool DoAnderson = AndersonEnabled && Cooloff == 0 && Iter >= AndersonWarmup;
+		if(Cooloff > 0) Cooloff--;
+
+		if(DoAnderson)
+		{
+			if(HavePrev)
+			{
+				if(HistLen == AndersonM)
+				{
+					for(int j=0; j<AndersonM-1; j++)
+					{
+						dFHist[j].swap(dFHist[j+1]);
+						dXHist[j].swap(dXHist[j+1]);
+					}
+					HistLen--;
+				}
+				for(int StrNo=0; StrNo<LocAmOfMainElem; StrNo++)
+				{
+					dFHist[HistLen][StrNo] = FVect[StrNo] - FPrev[StrNo];
+					dXHist[HistLen][StrNo] = MagnAr[StrNo] - XPrev[StrNo];
+				}
+				HistLen++;
+			}
+			for(int StrNo=0; StrNo<LocAmOfMainElem; StrNo++)
+			{
+				FPrev[StrNo] = FVect[StrNo];
+				XPrev[StrNo] = MagnAr[StrNo];
+			}
+			HavePrev = true;
+		}
+
+		bool Applied = false;
+		if(DoAnderson && HistLen > 0)
+		{
+			double G[64], B[8], Gamma[8];
+			for(int i=0; i<HistLen; i++)
+			{
+				for(int j=i; j<HistLen; j++)
+				{
+					double s = 0.;
+					for(int k=0; k<LocAmOfMainElem; k++)
+					{
+						TVector3d &a = dFHist[i][k], &b = dFHist[j][k];
+						s += a.x*b.x + a.y*b.y + a.z*b.z;
+					}
+					G[i*HistLen + j] = s; G[j*HistLen + i] = s;
+				}
+				double s = 0.;
+				for(int k=0; k<LocAmOfMainElem; k++)
+				{
+					TVector3d &a = dFHist[i][k], &f = FVect[k];
+					s += a.x*f.x + a.y*f.y + a.z*f.z;
+				}
+				B[i] = s;
+			}
+			double B0[8];
+			for(int i=0; i<HistLen; i++) B0[i] = B[i];  //solve overwrites B
+			int ok = radAndersonSolveLS(G, B, Gamma, HistLen);
+			if(ok)
+			{
+				//Predicted LS residual must stay in [0, ||F||^2].
+				double SumF2 = mInstMisfitMe2*double(LocAmOfMainElem);
+				double Pred = SumF2;
+				for(int i=0; i<HistLen; i++) Pred -= Gamma[i]*B0[i];
+				if(!(Pred >= -0.01*SumF2 && Pred <= 1.01*SumF2)) ok = 0;
+			}
+			if(ok)
+			{
+				//Damped extrapolation: cap max|gamma| by uniform scaling.
+				double gmax = 0.;
+				for(int i=0; i<HistLen; i++)
+					if(fabs(Gamma[i]) > gmax) gmax = fabs(Gamma[i]);
+				if(gmax > 2.)
+				{
+					double sc = 2./gmax;
+					for(int i=0; i<HistLen; i++) Gamma[i] *= sc;
+				}
+				for(int StrNo=0; StrNo<LocAmOfMainElem; StrNo++)
+				{
+					TVector3d Upd = AndersonBetaCur*FVect[StrNo];
+					for(int j=0; j<HistLen; j++)
+						Upd -= Gamma[j]*(dXHist[j][StrNo] + AndersonBetaCur*dFHist[j][StrNo]);
+					MagnAr[StrNo] += Upd;
+					IntrctPtr->g3dRelaxPtrVect[StrNo]->Magn = MagnAr[StrNo];
+				}
+				Applied = true;
+			}
+			else HistLen = 0;  //degenerate or wild LS: drop the history
+		}
+		if(!Applied)
+		{
+			for(int StrNo=0; StrNo<LocAmOfMainElem; StrNo++)
+			{
+				MagnAr[StrNo] += CurOmega*FVect[StrNo];
+				IntrctPtr->g3dRelaxPtrVect[StrNo]->Magn = MagnAr[StrNo];
+			}
+		}
+		LastAnderson = Applied;
+	}
+	delete[] PropMagnAr;
+
+	IntrctPtr->RelaxStatusParam.MisfitM = -1.;
+	ComputeRelaxStatusParam(IntrctPtr->NewMagnArray, NULL, IntrctPtr->NewFieldArray);
+	IntrctPtr->RelaxStatusParam.MisfitM = sqrt(mInstMisfitMe2);
+
+	return IterDone;
 }
 
 //-------------------------------------------------------------------------

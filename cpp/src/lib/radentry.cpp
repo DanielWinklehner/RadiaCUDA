@@ -82,6 +82,7 @@ void ApplyMaterial( int, int );
 void MvsH( int, char*, double,double,double );
 
 void PreRelax( int, int );
+void RadSetGpuAsmEnabled( int ); //RadiaCUDA: GPU IM-assembly switch (radintrc.cpp)
 void ShowInteractMatrix(int);
 void ShowInteractVector(int, char*);
 void ManualRelax( int, int, int, double );
@@ -916,8 +917,9 @@ int CALL RadMatSatAniso(int* n, double* pDataPar, int LenDataPar, double* pDataP
 
 //-------------------------------------------------------------------------
 
-int CALL RadRlxPre(int* n, int Obj, int SrcObj)
+int CALL RadRlxPre(int* n, int Obj, int SrcObj, int use_gpu_asm)
 {
+	RadSetGpuAsmEnabled(use_gpu_asm);
 	PreRelax(Obj, SrcObj);
 
 	*n = ioBuffer.OutInt();

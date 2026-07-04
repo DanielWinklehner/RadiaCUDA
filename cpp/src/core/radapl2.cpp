@@ -27,6 +27,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 
 #ifdef _WITH_MPI
 #include <mpi.h>
@@ -1321,13 +1322,11 @@ int radTApplication::MakeAutoRelax(int InteractElemKey, double PrecOnMagnetiz, i
 					else if(!strcmp(*BufValString, (OptNam.ZeroM_Values)[3])) MagnResetIsNotNeeded = 0; //true
 					else { Send.ErrorMessage("Radia::Error062"); return 0; }
 				}
-#ifdef RADIA_WITH_CUDA
 				else if(!strcmp(*BufNameString, "omega"))
-				{
+				{//initial under-relaxation parameter for the adaptive Jacobi solvers (method 9 GPU / method 10 CPU)
 					gpuOmega = atof(*BufValString);
 					if(gpuOmega <= 0.0 || gpuOmega > 1.0) { Send.ErrorMessage("Radia::Error062"); return 0; }
 				}
-#endif
 				else { Send.ErrorMessage("Radia::Error062"); return 0; }
 				BufNameString++; BufValString++;
 			}
@@ -1367,30 +1366,67 @@ case 8:
 			ActualIterNum = RelaxMethNo_8.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded);
 		}
 		break;
-#ifdef RADIA_WITH_CUDA
 		case 9:
+		case 10:
 		{
-			// #9: the GPU solver flattens all elements and does not implement the staged
-			// (RelaxTogether/RelaxApart) sub-interval relaxation. If the model uses it, run
-			// the CPU staged solver (method 5's a5) -- the correct path -- not the GPU.
+			// #9 (GPU) / #10 (CPU) adaptive under-relaxed Jacobi: these flatten all
+			// elements and do not implement the staged (RelaxTogether/RelaxApart)
+			// sub-interval relaxation. If the model uses it, run the CPU staged
+			// solver (method 5's a5) -- the correct path.
 			if(InteractPtr->AmOfRelaxSubInterv != 0)
 			{
 				Send.WarningMessage("Radia::Warning023");
 				radTRelaxationMethNo_a5 RelaxMethNo_a5(InteractPtr);
 				ActualIterNum = RelaxMethNo_a5.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded);
+				break;
 			}
-			else
+			ActualIterNum = -1;
+#ifdef RADIA_WITH_CUDA
+			if(MethNo == 9)
 			{
 				ActualIterNum = radGPU_AutoRelax(InteractPtr, PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded, gpuOmega);
-				if(ActualIterNum < 0)
-				{
-					radTRelaxationMethNo_4 FallbackMeth4(InteractPtr);
-					ActualIterNum = FallbackMeth4.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded);
-				}
+			}
+#endif
+			if(ActualIterNum < 0)
+			{//MethNo == 10, or method 9 without CUDA in the build (e.g. an MPI
+			 //CPU-cluster build), or the GPU solver failed: run the CPU
+			 //implementation of the same algorithm.
+				radTRelaxationMethNo_10 RelaxMethNo_10(InteractPtr);
+				ActualIterNum = RelaxMethNo_10.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded, gpuOmega);
 			}
 		}
 		break;
+		case 11:
+		{
+			// #11: GPU Newton-Krylov (preconditioned GMRES on the analytic
+			// Jacobian) -- for models where the stationary methods (4/9/10)
+			// floor on soft high-permeability modes. Reported misfit is the
+			// RMS physics residual |M_mat(H) - M| (T); the iteration count is
+			// the total number of matvecs (maxIter caps that budget).
+			// Like 9/10 it flattens all elements: staged sub-interval
+			// relaxation falls back to the CPU staged solver.
+			if(InteractPtr->AmOfRelaxSubInterv != 0)
+			{
+				Send.WarningMessage("Radia::Warning023");
+				radTRelaxationMethNo_a5 RelaxMethNo_a5(InteractPtr);
+				ActualIterNum = RelaxMethNo_a5.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded);
+				break;
+			}
+			ActualIterNum = -1;
+#ifdef RADIA_WITH_CUDA
+			ActualIterNum = radGPU_AutoRelaxNK(InteractPtr, PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded, gpuOmega);
 #endif
+			if(ActualIterNum < 0)
+			{//No CUDA in the build or the GPU solver failed: there is no CPU
+			 //Newton-Krylov -- run the CPU adaptive Jacobi (method 10) so the
+			 //call still produces a solve, and say so.
+				fprintf(stderr, "RlxAuto method 11 (GPU Newton-Krylov) unavailable; "
+				        "falling back to CPU method 10.\n");
+				radTRelaxationMethNo_10 RelaxMethNo_10(InteractPtr);
+				ActualIterNum = RelaxMethNo_10.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded, gpuOmega);
+			}
+		}
+		break;
 		}
 
 			InteractPtr->OutRelaxStatusParam(RelaxStatusParamArray);
@@ -1421,7 +1457,10 @@ case 8:
 		//if(MPI_Barrier(MPI_COMM_WORLD) != MPI_SUCCESS) { Send.ErrorMessage("Radia::Error601"); throw 0; } //OC18012020
 #endif
 
-		if(ActualIterNum >= MaxIterNumber) { Send.WarningMessage("Radia::Warning015");}
+		//Warn on the master rank only: after the MPI_Bcast above every rank holds
+		//the same ActualIterNum, and without the gate each of the N ranks prints
+		//its own copy of Warning015 to the shared console.
+		if((m_rankMPI <= 0) && (ActualIterNum >= MaxIterNumber)) { Send.WarningMessage("Radia::Warning015");}
 		if(SendingIsRequired) Send.OutRelaxResultsInfo(RelaxStatusParamArray, lenRelaxStatusParamArray, ActualIterNum);
 
 		return ActualIterNum;

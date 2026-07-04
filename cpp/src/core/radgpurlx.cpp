@@ -22,29 +22,34 @@
 // ============================================================
 // Pack interaction data into GPU-friendly flat arrays
 // ============================================================
-int radGPU_PackInteractionData(radTInteraction* intrct, RadGPURelaxData* data)
+int radGPU_PackInteractionData(radTInteraction* intrct, RadGPURelaxData* data, int skipMatrix)
 {
     int N = intrct->AmOfMainElem;
     int N3 = 3 * N;
     memset(data, 0, sizeof(RadGPURelaxData));
     data->numElem = N;
     data->matrixDim = N3;
+    data->matrixStamp = intrct->mGpuMatrixStamp;
 
     // --- Flatten interaction matrix: TMatrix3df[N][N] -> float[N3 x N3] row-major ---
-    data->h_matrix = new float[(long long)N3 * N3];
-    for(int i = 0; i < N; i++) {
-        for(int j = 0; j < N; j++) {
-            TMatrix3df& blk = intrct->InteractMatrix[i][j];
-            int r0 = 3 * i, c0 = 3 * j;
-            data->h_matrix[(long long)(r0+0)*N3 + c0+0] = blk.Str0.x;
-            data->h_matrix[(long long)(r0+0)*N3 + c0+1] = blk.Str0.y;
-            data->h_matrix[(long long)(r0+0)*N3 + c0+2] = blk.Str0.z;
-            data->h_matrix[(long long)(r0+1)*N3 + c0+0] = blk.Str1.x;
-            data->h_matrix[(long long)(r0+1)*N3 + c0+1] = blk.Str1.y;
-            data->h_matrix[(long long)(r0+1)*N3 + c0+2] = blk.Str1.z;
-            data->h_matrix[(long long)(r0+2)*N3 + c0+0] = blk.Str2.x;
-            data->h_matrix[(long long)(r0+2)*N3 + c0+1] = blk.Str2.y;
-            data->h_matrix[(long long)(r0+2)*N3 + c0+2] = blk.Str2.z;
+    // (skipped when the caller verified the device cache already holds this
+    // interaction's matrix -- h_matrix stays null and the resident copy is used)
+    if(!skipMatrix) {
+        data->h_matrix = new float[(long long)N3 * N3];
+        for(int i = 0; i < N; i++) {
+            for(int j = 0; j < N; j++) {
+                TMatrix3df& blk = intrct->InteractMatrix[i][j];
+                int r0 = 3 * i, c0 = 3 * j;
+                data->h_matrix[(long long)(r0+0)*N3 + c0+0] = blk.Str0.x;
+                data->h_matrix[(long long)(r0+0)*N3 + c0+1] = blk.Str0.y;
+                data->h_matrix[(long long)(r0+0)*N3 + c0+2] = blk.Str0.z;
+                data->h_matrix[(long long)(r0+1)*N3 + c0+0] = blk.Str1.x;
+                data->h_matrix[(long long)(r0+1)*N3 + c0+1] = blk.Str1.y;
+                data->h_matrix[(long long)(r0+1)*N3 + c0+2] = blk.Str1.z;
+                data->h_matrix[(long long)(r0+2)*N3 + c0+0] = blk.Str2.x;
+                data->h_matrix[(long long)(r0+2)*N3 + c0+1] = blk.Str2.y;
+                data->h_matrix[(long long)(r0+2)*N3 + c0+2] = blk.Str2.z;
+            }
         }
     }
 
@@ -66,23 +71,11 @@ int radGPU_PackInteractionData(radTInteraction* intrct, RadGPURelaxData* data)
         data->h_magn[3*i+2] = m.z;
     }
 
-// --- Initialize H field from current external field + matrix*M ---
+    // --- H-field buffer (results come back here). The INITIAL per-element H
+    // is computed ON THE GPU with one matvec (H = A*M + H_ext) -- the O(N^2)
+    // CPU loop that used to live here cost seconds per call on big models.
     data->h_field = new double[N3];
-    for(int i = 0; i < N; i++) {
-        double hx = intrct->ExternFieldArray[i].x;
-        double hy = intrct->ExternFieldArray[i].y;
-        double hz = intrct->ExternFieldArray[i].z;
-        for(int j = 0; j < N; j++) {
-            TMatrix3df& blk = intrct->InteractMatrix[i][j];
-            TVector3d mj = intrct->g3dRelaxPtrVect[j]->Magn;
-            hx += (double)blk.Str0.x*mj.x + (double)blk.Str0.y*mj.y + (double)blk.Str0.z*mj.z;
-            hy += (double)blk.Str1.x*mj.x + (double)blk.Str1.y*mj.y + (double)blk.Str1.z*mj.z;
-            hz += (double)blk.Str2.x*mj.x + (double)blk.Str2.y*mj.y + (double)blk.Str2.z*mj.z;
-        }
-        data->h_field[3*i+0] = hx;
-        data->h_field[3*i+1] = hy;
-        data->h_field[3*i+2] = hz;
-    }
+    memset(data->h_field, 0, N3 * sizeof(double));
 
     // --- Allocate per-element material arrays ---
     data->h_matType = new int[N];

@@ -29,6 +29,14 @@
 //-------------------------------------------------------------------------
 //-------------------------------------------------------------------------
 
+char radTInteraction::gUseGpuAsm = 1; //RadiaCUDA: GPU IM assembly on by default
+
+//RadiaCUDA: C-linkage bridge so the entry layer (radentry.cpp) can set the
+//GPU-assembly flag without pulling in this header's include chain.
+extern "C" void RadSetGpuAsmEnabled(int on) { radTInteraction::gUseGpuAsm = on ? 1 : 0; }
+
+//-------------------------------------------------------------------------
+
 radTInteraction::radTInteraction(const radThg& In_hg, const radThg& In_hgMoreExtSrc, const radTCompCriterium& InCompCriterium, short InMemAllocTotAtOnce, char ExtraExternFieldArrayIsNeeded, char KeepTransData, int rankMPI, int nProcMPI) //OC08012020
 //radTInteraction::radTInteraction(const radThg& In_hg, const radThg& In_hgMoreExtSrc, const radTCompCriterium& InCompCriterium, short InMemAllocTotAtOnce, char ExtraExternFieldArrayIsNeeded, char KeepTransData)
 {
@@ -145,6 +153,13 @@ int radTInteraction::Setup(const radThg& In_hg, const radThg& In_hgMoreExtSrc, c
 
 	////ResetM();
 	//InitAuxArrays(); //OC30122019 (moved up)
+
+#ifdef RADIA_WITH_CUDA
+	{//Stamp this interaction matrix for the GPU-resident matrix cache.
+		static unsigned long long sGpuMatrixStampCounter = 0;
+		mGpuMatrixStamp = ++sGpuMatrixStampCounter;
+	}
+#endif
 
 	return 1;
 }
@@ -501,39 +516,56 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 	//--EndNew
 
 #ifdef RADIA_WITH_CUDA
-	if(m_nProcMPI < 2)
+	// GPU interaction-matrix assembly (gUseGpuAsm; rad.RlxPre(obj, use_gpu=...)).
+	// Serial: as before. Under MPI: rank 0 assembles on the GPU while the
+	// workers wait, then all ranks AGREE (Bcast) whether it succeeded -- the
+	// workers would otherwise deadlock in the distributed-CPU send/recv below.
+	if(gUseGpuAsm)
 	{
-		RadGPU_PolyData polyData;
-		RadGPU_RecMagData recData;
-		RadGPU_SymData symData;
-		RadGPU_AsmResult result;
-		memset(&polyData, 0, sizeof(polyData));
-		memset(&recData, 0, sizeof(recData));
-		memset(&symData, 0, sizeof(symData));
-		memset(&result, 0, sizeof(result));
-
-		if(radGPU_PackGeometryForAsm(this, &polyData, &recData, &symData))
+		int gpuAsmOK = 0;
+		if((m_nProcMPI < 2) || (m_rankMPI <= 0))
 		{
-			if(radGPU_AssembleMatrix(&polyData, &recData, &symData, &result) == 0)
-			{
-				radGPU_UnpackMatrix(&result, this);
-				radGPU_FreeAsmData(&polyData, &recData, &result);
-				radGPU_FreeSymData(&symData);
+			RadGPU_PolyData polyData;
+			RadGPU_RecMagData recData;
+			RadGPU_SymData symData;
+			RadGPU_AsmResult result;
+			memset(&polyData, 0, sizeof(polyData));
+			memset(&recData, 0, sizeof(recData));
+			memset(&symData, 0, sizeof(symData));
+			memset(&result, 0, sizeof(result));
 
-				for(int ClNo=0; ClNo<AmOfMainElem; ClNo++)
-				{
-					radTg3dRelax* g3dRelaxPtrClNo = g3dRelaxPtrVect[ClNo];
-					g3dRelaxPtrVect[ClNo] = g3dRelaxPtrClNo->FormalIntrctMemberPtr();
-				}
-				return 1;
-			}
-			else
+			if(radGPU_PackGeometryForAsm(this, &polyData, &recData, &symData))
 			{
-				radGPU_FreeAsmData(&polyData, &recData, &result);
-				radGPU_FreeSymData(&symData);
-				Send.WarningMessage("Radia::Warning021"); //GPU assembly could not complete (e.g. out of GPU memory or unimplemented element kernel); falling back to CPU
+				if(radGPU_AssembleMatrix(&polyData, &recData, &symData, &result) == 0)
+				{
+					radGPU_UnpackMatrix(&result, this);
+					radGPU_FreeAsmData(&polyData, &recData, &result);
+					radGPU_FreeSymData(&symData);
+
+					for(int ClNo=0; ClNo<AmOfMainElem; ClNo++)
+					{
+						radTg3dRelax* g3dRelaxPtrClNo = g3dRelaxPtrVect[ClNo];
+						g3dRelaxPtrVect[ClNo] = g3dRelaxPtrClNo->FormalIntrctMemberPtr();
+					}
+					gpuAsmOK = 1;
+				}
+				else
+				{
+					radGPU_FreeAsmData(&polyData, &recData, &result);
+					radGPU_FreeSymData(&symData);
+					Send.WarningMessage("Radia::Warning021"); //GPU assembly could not complete (e.g. out of GPU memory or unimplemented element kernel); falling back to CPU
+				}
 			}
 		}
+#ifdef _WITH_MPI
+		if((m_rankMPI >= 0) && (m_nProcMPI >= 2))
+		{
+			if(MPI_Bcast(&gpuAsmOK, 1, MPI_INT, 0, MPI_COMM_WORLD) != MPI_SUCCESS) { Send.ErrorMessage("Radia::Error601"); return 0; }
+		}
+#endif
+		if(gpuAsmOK) return 1;
+		//else: fall through to the CPU assembly (serial or MPI-distributed),
+		//consistently on all ranks.
 	}
 #endif
 
@@ -608,7 +640,12 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 		int nPacketsTot = 0; //required for master process
 		long long nMaxMatrElemInPacket = 0;
 
-		if(m_nProcMPI < 3)
+		//NOTE (RadiaCUDA): the 2-rank shortcut of sending the WHOLE matrix in one
+		//packet overflows MPI_Send's int count for AmOfMainElem >~ 15450
+		//(N*N*9 floats > INT_MAX) -> send error while the master blocks in
+		//MPI_Recv = deadlock. Restrict it to small models; large 2-rank runs
+		//use the same column-packet scheme as nProc >= 3.
+		if((m_nProcMPI < 3) && (AmOfMainElem < switchAmOfElem))
 		{
 			long long nTotMainElem = ((long long)AmOfMainElem)*((long long)AmOfMainElem);
 

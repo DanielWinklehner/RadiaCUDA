@@ -2240,18 +2240,19 @@ static PyObject* radia_MatMvsH(PyObject* self, PyObject* args)
 /************************************************************************//**
  * Magnetic Field Calculation Methods: Builds interaction matrix for an object.
  ***************************************************************************/
-static PyObject* radia_RlxPre(PyObject* self, PyObject* args)
+static PyObject* radia_RlxPre(PyObject* self, PyObject* args, PyObject* kwargs)
 {
 	PyObject *oResInd=0;
+	static char *kwlist[] = {(char*)"obj", (char*)"srcobj", (char*)"use_gpu", NULL};
 	try
 	{
 		int indObj = 0, indSrc = 0;
-		//if(!PyArg_ParseTuple(args, "ii:RlxPre", &indObj, &indSrc)) throw CombErStr(strEr_BadFuncArg, ": RlxPre");
-		if(!PyArg_ParseTuple(args, "i|i:RlxPre", &indObj, &indSrc)) throw CombErStr(strEr_BadFuncArg, ": RlxPre"); //AB22112019
+		int use_gpu = 1; //RadiaCUDA: GPU interaction-matrix assembly by default
+		if(!PyArg_ParseTupleAndKeywords(args, kwargs, "i|ip:RlxPre", kwlist, &indObj, &indSrc, &use_gpu)) throw CombErStr(strEr_BadFuncArg, ": RlxPre");
 		if(indObj == 0) throw CombErStr(strEr_BadFuncArg, ": RlxPre");
 
 		int ind = 0;
-		g_pyParse.ProcRes(RadRlxPre(&ind, indObj, indSrc));
+		g_pyParse.ProcRes(RadRlxPre(&ind, indObj, indSrc, use_gpu));
 
 		oResInd = Py_BuildValue("i", ind);
 		
@@ -3336,9 +3337,9 @@ static PyMethodDef radia_methods[] = {
 	{"MatApl", radia_MatApl, METH_VARARGS, "MatApl(obj,mat) applies material mat to object obj."},
 	{"MatMvsH", radia_MatMvsH, METH_VARARGS, "MatMvsH(obj,'mx|my|mz'|'',[hx,hy,hz]) computes magnetization from magnetic field strength vector [hx,hy,hz] for the material of the object obj; the magnetization components are specified by the second argument."},
 
-	{"RlxPre", radia_RlxPre, METH_VARARGS, "RlxPre(obj,srcobj:0) builds an interaction matrix for the object obj, treating the object srcobj as additional external field source."},
+	{"RlxPre", (PyCFunction)radia_RlxPre, METH_VARARGS | METH_KEYWORDS, "RlxPre(obj,srcobj:0,use_gpu=True) builds an interaction matrix for the object obj, treating the object srcobj as additional external field source. use_gpu=True (default) assembles the matrix on the GPU (under MPI: on rank 0 while the workers wait); use_gpu=False uses the classic CPU assembly (MPI-distributed when radia MPI is active)."},
 	{"RlxMan", radia_RlxMan, METH_VARARGS, "RlxMan(intrc,meth,iternum,rlxpar) executes manual relaxation procedure for interaction matrix intrc using method number meth, by making iternum iterations with relaxation parameter value rlxpar."},
-	{"RlxAuto", radia_RlxAuto, METH_VARARGS, "RlxAuto(intrc,prec,maxiter,meth:4,'ZeroM->True|False') executes automatic relaxation procedure with the interaction matrix intrc using the method number meth. Relaxation stops whenever the change in magnetization (averaged over all sub-elements) between two successive iterations is smaller than prec or the number of iterations is larger than maxiter. The option value 'ZeroM->True' (default) starts the relaxation by setting the magnetization values in all paricipating objects to zero; 'ZeroM->False' starts the relaxation with the existing magnetization values in the sub-volumes."},
+	{"RlxAuto", radia_RlxAuto, METH_VARARGS, "RlxAuto(intrc,prec,maxiter,meth:4,'ZeroM->True|False','omega->0.3') executes automatic relaxation procedure with the interaction matrix intrc using the method number meth (3/4/5/8: classic CPU schemes; 9: adaptive under-relaxed Jacobi on the GPU, falling back to its CPU implementation when CUDA is unavailable or fails; 10: the same adaptive Jacobi solver explicitly on the CPU -- more robust than 4 on strongly-coupled saturating models). Relaxation stops whenever the change in magnetization (averaged over all sub-elements) between two successive iterations is smaller than prec or the number of iterations is larger than maxiter. The option value 'ZeroM->True' (default) starts the relaxation by setting the magnetization values in all paricipating objects to zero; 'ZeroM->False' starts the relaxation with the existing magnetization values in the sub-volumes. The option 'omega->x' (0 < x <= 1, default 0.3) sets the initial under-relaxation parameter of methods 9/10."},
 	{"RlxUpdSrc", radia_RlxUpdSrc, METH_VARARGS, "RlxUpdSrc(intrc) updates external field data for the relaxation (to take into account e.g. modification of currents in coils, if any) without rebuilding the interaction matrix."},
 	{"Solve", radia_Solve, METH_VARARGS, "Solve(obj,prec,maxiter,meth:4) solves a magnetostatic problem, i.e. builds an interaction matrix for the object obj and performs a relaxation procedure using the method number meth (default is 4, use 9 for CUDA-accelerated). The relaxation stops whenever the change in magnetization (averaged over all sub-elements) between two successive iterations is smaller than prec or the number of iterations is larger than maxiter."},
 

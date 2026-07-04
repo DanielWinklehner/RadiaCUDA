@@ -712,11 +712,14 @@ EXP int CALL RadMatSatAniso(int* mat, double* DataPar, int nDataPar, double* Dat
 /** Builds interaction matrix for the object obj.
 @param n [out] reference number of the interaction matrix created
 @param obj [in] reference number of the object for which the interaction matrix should be created
-@param srcobj [in] reference number of the object creating additional constant magnetic field 
+@param srcobj [in] reference number of the object creating additional constant magnetic field
+@param use_gpu_asm [in] RadiaCUDA: 1 (default) = assemble the interaction matrix on the GPU
+       (under MPI: on rank 0 while the workers wait); 0 = classic CPU assembly
+       (MPI-distributed when radia MPI is active)
 @return integer error code (0 : no error, >0 : error number, <0 : warning number)
 @author O.C.
 */
-EXP int CALL RadRlxPre(int* n, int obj, int srcobj);
+EXP int CALL RadRlxPre(int* n, int obj, int srcobj, int use_gpu_asm=1);
 
 /** Executes manual relaxation procedure for the interaction matrix intrc.
 @param D [out] an array of four numbers specifying: [0] average absolute change in magnetization after previous iteration over all the objects participating in the relaxation, [1] maximum absolute value of magnetization over all the objects participating in the relaxation, [2] maximum absolute value of magnetic field strength over central points of all the objects participating in the relaxation, and [3] actual number of iterations done. The values [0]-[2] are those of last iteration.

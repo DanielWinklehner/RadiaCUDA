@@ -87,11 +87,19 @@ typedef vector<radTRelaxSubInterval> radTVectRelaxSubInterval;
 class radTInteraction : public radTg {
 
 #ifdef RADIA_WITH_CUDA
-	friend int radGPU_PackInteractionData(radTInteraction*, struct RadGPURelaxData*);
+	friend int radGPU_PackInteractionData(radTInteraction*, struct RadGPURelaxData*, int);
 	friend void radGPU_UnpackMagnetization(struct RadGPURelaxData*, radTInteraction*);
 	friend int radGPU_AutoRelax(radTInteraction*, double, int, char, double);
+	friend int radGPU_AutoRelaxNK(radTInteraction*, double, int, char, double);
 	friend int radGPU_PackGeometryForAsm(radTInteraction*, struct RadGPU_PolyData*, struct RadGPU_RecMagData*, struct RadGPU_SymData*);
 	friend void radGPU_UnpackMatrix(struct RadGPU_AsmResult*, radTInteraction*);
+
+public:
+	// Unique identity of THIS interaction matrix (assigned once per Setup);
+	// keys the GPU-resident matrix cache so repeated RlxAuto calls on the
+	// same matrix skip the flatten + device upload. 0 = not set up.
+	unsigned long long mGpuMatrixStamp = 0;
+private:
 #endif
 
 	int AmOfMainElem;
@@ -135,6 +143,12 @@ public:
 
 	short SomethingIsWrong;
 	short MemAllocTotAtOnce;
+
+	// RadiaCUDA: GPU interaction-matrix assembly switch (default on). Set per
+	// RlxPre call via rad.RlxPre(obj, use_gpu=...). Under MPI, rank 0
+	// assembles on the GPU while the workers wait; with the flag off the
+	// classic MPI-distributed CPU assembly is used.
+	static char gUseGpuAsm;
 
 	radTInteraction(const radThg&, const radThg&, const radTCompCriterium&, short =0, char =0, char =0, int =-1, int =0); //OC08012020
 	//radTInteraction(const radThg&, const radThg&, const radTCompCriterium&, short =0, char =0, char =0);
@@ -217,6 +231,7 @@ public:
 	friend class radTRelaxationMethNo_a5;
 	friend class radTRelaxationMethNo_7;
 	friend class radTRelaxationMethNo_8;
+	friend class radTRelaxationMethNo_10;
 };
 
 //-------------------------------------------------------------------------

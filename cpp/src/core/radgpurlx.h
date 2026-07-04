@@ -22,7 +22,13 @@ struct RadGPURelaxData {
     int matrixDim;         // 3 * numElem
     double omega;              // initial omega, negative = use default (0.3)
 
+    // Identity stamp of the interaction matrix (radTInteraction::mGpuMatrixStamp).
+    // When it matches the device-side cache, h_matrix may be null (flatten +
+    // upload skipped; the resident device matrix is reused).
+    unsigned long long matrixStamp;
+
     // Interaction matrix flattened to row-major float[matrixDim x matrixDim]
+    // (null when the device cache holds this stamp already)
     float* h_matrix;
 
     // Working arrays (double)
@@ -55,7 +61,6 @@ struct RadGPURelaxData {
 };
 
 // GPU solver — returns iteration count, or -1 on failure
-// GPU solver — returns iteration count, or -1 on failure
 int radGPU_RelaxAuto(
     RadGPURelaxData* data,
     double precision,
@@ -64,10 +69,26 @@ int radGPU_RelaxAuto(
     double* outMaxModM,
     double* outMaxModH);
 
-// Data packing/unpacking
+// Method 11: Newton-Krylov (preconditioned GMRES on the analytic Jacobian).
+// Reported misfit = RMS physics residual |M_mat(H) - M| in T; returned count
+// = total matvecs (maxIter caps that budget). -1 on failure.
+int radGPU_RelaxNK(
+    RadGPURelaxData* data,
+    double precision,
+    int maxIter,
+    double* outMisfitM,
+    double* outMaxModM,
+    double* outMaxModH);
+
+// Data packing/unpacking. skipMatrix != 0 leaves h_matrix null (caller
+// verified the device cache holds this interaction's matrix already).
 int radGPU_PackInteractionData(
     class radTInteraction* intrct,
-    RadGPURelaxData* gpuData);
+    RadGPURelaxData* gpuData,
+    int skipMatrix = 0);
+
+// True when the device-side matrix cache holds this (stamp, matrixDim).
+int radGPU_MatrixCached(unsigned long long stamp, int matrixDim);
 
 void radGPU_UnpackMagnetization(
     RadGPURelaxData* gpuData,

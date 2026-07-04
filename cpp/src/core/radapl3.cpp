@@ -22,6 +22,8 @@
 
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 #ifdef _WITH_MPI
 #include <mpi.h>
@@ -155,6 +157,8 @@ void radTApplication::ComputeField(int ElemKey, char* FieldChar, double** Points
 		radTFieldKey FieldKey;
 		if(!ValidateFieldChar(FieldChar, &FieldKey)) return;
 
+		static const bool sMpiDebugFld = (getenv("RADIA_MPI_DEBUG") != 0);
+
 		if(m_nProcMPI < 2) //OC01012020
 		{
 			FieldArray = new radTField[Np];
@@ -178,6 +182,17 @@ void radTApplication::ComputeField(int ElemKey, char* FieldChar, double** Points
 #ifdef _WITH_MPI
 		else
 		{
+			//Per-call MPI tag (identical on all ranks: the call is collective, so the
+			//counter advances in lockstep). Without it every packet is tag 0 and the
+			//master's MPI_ANY_SOURCE receive can match a FAST worker's packet from the
+			//NEXT rad.Fld call while still collecting the current one -- corrupting the
+			//map, failing with MPI_ERR_TRUNCATE (next-call packet bigger than the posted
+			//buffer), or deadlocking (observed with mpiexec -n 20). Tag 0 stays reserved
+			//for the interaction-matrix assembly.
+			static int sFldMpiCallCnt = 0;
+			sFldMpiCallCnt++;
+			int tagMPI = 1 + (sFldMpiCallCnt & 0x3FFF);
+
 			int nProc_mi_1 = m_nProcMPI - 1;
 			int rank_mi_1 = m_rankMPI - 1;
 			pair<long, long> pairStartEnd(rank_mi_1, m_rankMPI); //if(m_nProcMPI - 1 > Np)
@@ -217,6 +232,11 @@ void radTApplication::ComputeField(int ElemKey, char* FieldChar, double** Points
 			//std::cout.flush(); //DEBUG
 
 			long locNp = pairStartEnd.second - pairStartEnd.first;
+			if(sMpiDebugFld)
+			{
+				fprintf(stderr, "[RADIA_MPI_DEBUG] ComputeField enter: rank=%d Np=%ld nValsPerPt=%ld locNp=%ld iStart=%ld nPacketsTot=%d nMaxNpInPacket=%ld\n",
+					m_rankMPI, Np, nFldValsPerPt, locNp, (long)pairStartEnd.first, nPacketsTot, nMaxNpInPacket); fflush(stderr);
+			}
 			if((m_rankMPI > 0) && (locNp > 0))
 			{//workers
 				long long nTotFldVals = nFldValsPerPt*locNp;
@@ -245,7 +265,18 @@ void radTApplication::ComputeField(int ElemKey, char* FieldChar, double** Points
 				}
 
 				int nVals = (int)(t_arFldVals - arFldVals); //or nTotFldVals + 2
-				if(MPI_Send(arFldVals, nVals, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD) != MPI_SUCCESS) { Send.ErrorMessage("Radia::Error601"); throw 0;}
+				if(sMpiDebugFld)
+				{
+					fprintf(stderr, "[RADIA_MPI_DEBUG] worker send: rank=%d nVals=%d\n", m_rankMPI, nVals); fflush(stderr);
+				}
+				int rcSend = MPI_Send(arFldVals, nVals, MPI_DOUBLE, 0, tagMPI, MPI_COMM_WORLD);
+				if(rcSend != MPI_SUCCESS)
+				{
+					char sErrMPI[MPI_MAX_ERROR_STRING]; int lenErrMPI = 0;
+					MPI_Error_string(rcSend, sErrMPI, &lenErrMPI);
+					fprintf(stderr, "radia ComputeField MPI_Send failed: rank=%d nVals=%d: %s\n", m_rankMPI, nVals, sErrMPI); fflush(stderr);
+					Send.ErrorMessage("Radia::Error601"); throw 0;
+				}
 
 				//std::cout << "rank=" << m_rankMPI << " field calculated and sent, nVals=" << nVals << "\n"; //DEBUG
 				//std::cout.flush(); //DEBUG
@@ -271,8 +302,23 @@ void radTApplication::ComputeField(int ElemKey, char* FieldChar, double** Points
 				MPI_Status statMPI;
 				for(long i=0; i<nPacketsTot; i++)
 				{
-					if(MPI_Recv(arFldValsRecv, nMaxValInPacket, MPI_DOUBLE, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &statMPI) != MPI_SUCCESS) { Send.ErrorMessage("Radia::Error601"); throw 0;}
+					int rcRecv = MPI_Recv(arFldValsRecv, nMaxValInPacket, MPI_DOUBLE, MPI_ANY_SOURCE, tagMPI, MPI_COMM_WORLD, &statMPI);
+					if(rcRecv != MPI_SUCCESS)
+					{
+						char sErrMPI[MPI_MAX_ERROR_STRING]; int lenErrMPI = 0;
+						MPI_Error_string(rcRecv, sErrMPI, &lenErrMPI);
+						int cntRecv = -1; MPI_Get_count(&statMPI, MPI_DOUBLE, &cntRecv);
+						fprintf(stderr, "radia ComputeField MPI_Recv failed: packet=%ld/%d bufLen=%ld fromRank=%d count=%d: %s\n",
+							i, nPacketsTot, nMaxValInPacket, statMPI.MPI_SOURCE, cntRecv, sErrMPI); fflush(stderr);
+						Send.ErrorMessage("Radia::Error601"); throw 0;
+					}
 
+					if(sMpiDebugFld)
+					{
+						int cntRecv = -1; MPI_Get_count(&statMPI, MPI_DOUBLE, &cntRecv);
+						fprintf(stderr, "[RADIA_MPI_DEBUG] master recv: packet=%ld/%d from=%d count=%d jStart=%ld jEnd=%ld\n",
+							i, nPacketsTot, statMPI.MPI_SOURCE, cntRecv, (long)arFldValsRecv[0], (long)arFldValsRecv[1]); fflush(stderr);
+					}
 					double *t_arFldValsRecv = arFldValsRecv;
 					long jStart = (long)(*(t_arFldValsRecv++));
 					long jEnd = (long)(*(t_arFldValsRecv++));
