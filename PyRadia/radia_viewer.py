@@ -1,5 +1,7 @@
 """Lightweight 3D viewer for Radia geometries using PyVista."""
 
+import sys
+
 import numpy as np
 
 try:
@@ -8,6 +10,39 @@ try:
 except ImportError:
     pv = None
     HAS_PYVISTA = False
+
+_DPI_AWARE_SET = False
+
+
+def ensure_dpi_aware():
+    """Make the process per-monitor DPI-aware on Windows before a pyvista/VTK
+    window opens, so the 3D view renders at NATIVE resolution (crisp) instead
+    of being bitmap-upscaled by the OS on a scaled high-DPI display.
+
+    This is the same process-wide setting that Qt-based toolkits (e.g.
+    matplotlib's Qt backend) apply as a side effect of opening a window --
+    which is why a Radia view was only sharp after a matplotlib figure had been
+    shown. Call it before creating the render window. Idempotent; a no-op off
+    Windows, if already set, or if the API is unavailable.
+    """
+    global _DPI_AWARE_SET
+    if _DPI_AWARE_SET or sys.platform != "win32":
+        return
+    _DPI_AWARE_SET = True
+    import ctypes
+
+    # Newest -> oldest; each raises AttributeError on Windows too old for it.
+    # -4 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (matches Qt6/PySide6).
+    for setter in (
+        lambda: ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)),
+        lambda: ctypes.windll.shcore.SetProcessDpiAwareness(2),   # PER_MONITOR
+        lambda: ctypes.windll.user32.SetProcessDPIAware(),        # system-aware
+    ):
+        try:
+            setter()
+            return
+        except Exception:
+            continue
 
 
 def ObjDrwPyVista(obj, opacity=1.0, show_edges=True):
@@ -30,6 +65,7 @@ def ObjDrwPyVista(obj, opacity=1.0, show_edges=True):
 
     data = rad.ObjDrwVTK(obj, 'EdgeLines->False')
 
+    ensure_dpi_aware()  # crisp on scaled high-DPI Windows; must precede the window
     plotter = pv.Plotter()
     plotter.set_background("white")
 
