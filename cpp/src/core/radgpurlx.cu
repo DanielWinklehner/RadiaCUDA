@@ -615,6 +615,26 @@ int radGPU_RelaxAuto(
             fprintf(stderr, "radGPU_RelaxAuto: matrix neither packed nor cached\n");
             goto cleanup;
         }
+        {// Pre-flight: refuse cleanly (with sizing guidance) instead of a
+         // raw CUDA malloc failure when the dense matrix cannot fit.
+            size_t freeB = 0, totalB = 0;
+            cudaMemGetInfo(&freeB, &totalB);
+            size_t needB = matSize * sizeof(float)
+                           + (size_t)N3 * 24 * sizeof(double);  // work arrays
+            if(needB > freeB) {
+                double maxElem = (freeB > 0)
+                    ? (sqrt((double)freeB / sizeof(float)) / 3.0) : 0.0;
+                fprintf(stderr,
+                    "radGPU_RelaxAuto: dense interaction matrix needs %.1f GB "
+                    "but only %.1f of %.1f GB GPU memory is free (~%.0fk "
+                    "elements max on this GPU). Falling back to the CPU "
+                    "relaxation (method 10, OpenMP-parallel) -- expect "
+                    "minutes-per-1000-iterations at this size; consider a "
+                    "coarser mesh or structured elements.\n",
+                    needB / 1e9, freeB / 1e9, totalB / 1e9, maxElem / 1e3);
+                goto cleanup;  // returns -1 -> dispatch falls back to method 10
+            }
+        }
         CUDA_CHK(cudaMalloc(&d_matrix, matSize * sizeof(float)));
         CUDA_CHK(cudaMemcpy(d_matrix, data->h_matrix, matSize * sizeof(float), cudaMemcpyHostToDevice));
         g_d_matCache = d_matrix;
