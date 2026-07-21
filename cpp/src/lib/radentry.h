@@ -1080,6 +1080,13 @@ EXP int CALL RadUtiVer(double* d);
 */
 EXP int CALL RadUtiFldLastBackend(int* pBackend);
 
+/** Reports which backend serviced the most recent interaction-matrix assembly (RadRlxPre).
+@param pBackend [out] -1 if no assembly has occurred yet, 0 if the CPU assembly was used, 1 if the GPU assembly was used
+@return integer error code (0 : no error)
+@author DW
+*/
+EXP int CALL RadUtiAsmLastBackend(int* pBackend);
+
 /** initializes or finalizes the Message Passing Inteface (MPI) for parallel calculations and returns list of basic MPI process parameters (in the case of initialization): rank of a process and total number of processes.
 @param arPar [out] array of basic MPI parameters: rank of a process [0] and total number of processes [1]
 @param OnOrOff [in] string containing either "on" or "off"

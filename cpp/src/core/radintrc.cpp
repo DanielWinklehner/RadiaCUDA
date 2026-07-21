@@ -30,10 +30,12 @@
 //-------------------------------------------------------------------------
 
 char radTInteraction::gUseGpuAsm = 1; //RadiaCUDA: GPU IM assembly on by default
+char radTInteraction::gLastAsmBackend = -1; //RadiaCUDA: -1 = no assembly yet, 0 = CPU, 1 = GPU
 
 //RadiaCUDA: C-linkage bridge so the entry layer (radentry.cpp) can set the
 //GPU-assembly flag without pulling in this header's include chain.
 extern "C" void RadSetGpuAsmEnabled(int on) { radTInteraction::gUseGpuAsm = on ? 1 : 0; }
+extern "C" int RadGetLastAsmBackend() { return (int)radTInteraction::gLastAsmBackend; }
 
 //-------------------------------------------------------------------------
 
@@ -511,6 +513,8 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 	radTFieldKey FieldKeyInteract; FieldKeyInteract.B_=FieldKeyInteract.H_=FieldKeyInteract.PreRelax_=1;
 	TVector3d ZeroVect(0.,0.,0.);
 
+	gLastAsmBackend = 0; //RadiaCUDA diagnostic: set to 1 below iff GPU assembly succeeds
+
 	//--New
 	int AmOfElemWithSym = CountRelaxElemsWithSym();
 	//--EndNew
@@ -563,7 +567,7 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 			if(MPI_Bcast(&gpuAsmOK, 1, MPI_INT, 0, MPI_COMM_WORLD) != MPI_SUCCESS) { Send.ErrorMessage("Radia::Error601"); return 0; }
 		}
 #endif
-		if(gpuAsmOK) return 1;
+		if(gpuAsmOK) { gLastAsmBackend = 1; return 1;}
 		//else: fall through to the CPU assembly (serial or MPI-distributed),
 		//consistently on all ranks.
 	}

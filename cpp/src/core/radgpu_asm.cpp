@@ -42,7 +42,8 @@ int radGPU_PackGeometryForAsm(
 
     radTCast Cast;
 
-    // --- Classify elements ---
+    // --- Classify elements (mixed RecMag + polyhedron models are supported:
+    //     the assembly kernel branches per SOURCE element type) ---
     int nRec = 0, nPoly = 0;
     for(int i = 0; i < N; i++) {
         radTg3dRelax* rel = intrct->g3dRelaxPtrVect[i];
@@ -50,6 +51,12 @@ int radGPU_PackGeometryForAsm(
         radTPolyhedron* polyPtr = Cast.PolyhedronCast(rel);
         if(recPtr) nRec++;
         else if(polyPtr) nPoly++;
+    }
+    if(nRec + nPoly != N) {
+        // Some element is neither a RecMag nor a polyhedron (e.g. an extruded
+        // polygon) -- no GPU kernel for it; warn and use the CPU assembly.
+        radTSend::WarningMessage("Radia::Warning020");
+        return 0;
     }
 
     // --- Extract observation centers (transformed by MainTransPtrArray) ---
@@ -62,16 +69,21 @@ int radGPU_PackGeometryForAsm(
         obsCenters[3*i+2] = cp.z;
     }
 
-    // --- RecMag packing ---
+    // --- RecMag packing (global element indexing; zeros where not a RecMag) ---
     memset(recData, 0, sizeof(RadGPU_RecMagData));
-    if(nRec > 0 && nRec == N) {
-        recData->n_elem = N;
-        recData->centers = new double[3 * N];
-        recData->dims = new double[3 * N];
-        recData->obs_centers = obsCenters;  // transfer ownership
-
+    recData->n_rec = nRec;
+    recData->is_rec = new int[N]();
+    recData->centers = new double[3 * N]();
+    recData->dims = new double[3 * N]();
+    recData->abs_rand = radCR.AbsRand;
+    recData->rel_rand = radCR.RelRand;
+    recData->zero_rand = radCR.ZeroRand;
+    recData->act_on_doubles = radCR.ActOnDoubles;
+    if(nRec > 0) {
         for(int i = 0; i < N; i++) {
             radTRecMag* rec = Cast.RecMagCast(intrct->g3dRelaxPtrVect[i]);
+            if(!rec) continue;
+            recData->is_rec[i] = 1;
             recData->centers[3*i+0] = rec->CentrPoint.x;
             recData->centers[3*i+1] = rec->CentrPoint.y;
             recData->centers[3*i+2] = rec->CentrPoint.z;
@@ -79,19 +91,17 @@ int radGPU_PackGeometryForAsm(
             recData->dims[3*i+1] = rec->Dimensions.y;
             recData->dims[3*i+2] = rec->Dimensions.z;
         }
-    } else if(nRec > 0) {
-        radTSend::WarningMessage("Radia::Warning020");
-        delete[] obsCenters;
-        return 0;
     }
 
-    // --- Polyhedron packing ---
+    // --- Polyhedron face packing (global element indexing; RecMag elements
+    //     get an empty face range) ---
     memset(polyData, 0, sizeof(RadGPU_PolyData));
-    if(nPoly > 0 && nPoly == N) {
+    {
         // First pass: count faces and edges
         int totalFaces = 0, totalEdges = 0;
         for(int i = 0; i < N; i++) {
             radTPolyhedron* poly = Cast.PolyhedronCast(intrct->g3dRelaxPtrVect[i]);
+            if(!poly) continue;
             totalFaces += poly->AmOfFaces;
             for(int fi = 0; fi < poly->AmOfFaces; fi++) {
                 totalEdges += poly->VectHandlePgnAndTrans[fi].PgnHndl.rep->AmOfEdgePoints;
@@ -114,6 +124,7 @@ int radGPU_PackGeometryForAsm(
         for(int i = 0; i < N; i++) {
             polyData->face_offsets[i] = faceIdx;
             radTPolyhedron* poly = Cast.PolyhedronCast(intrct->g3dRelaxPtrVect[i]);
+            if(!poly) continue;  // RecMag: empty face range
 
             for(int fi = 0; fi < poly->AmOfFaces; fi++) {
                 radTHandlePgnAndTrans& hpt = poly->VectHandlePgnAndTrans[fi];
@@ -157,16 +168,6 @@ int radGPU_PackGeometryForAsm(
         }
         polyData->face_offsets[N] = faceIdx;
         polyData->edge_offsets[totalFaces] = edgeIdx;
-    } else if(nPoly > 0) {
-        radTSend::WarningMessage("Radia::Warning020");
-        if(nRec == 0) delete[] obsCenters;
-        return 0;
-    }
-
-    // If no elements recognized
-    if(nRec == 0 && nPoly == 0) {
-        delete[] obsCenters;
-        return 0;
     }
 
     // --- Per-element symmetry transforms ---

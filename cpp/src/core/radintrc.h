@@ -149,6 +149,9 @@ public:
 	// assembles on the GPU while the workers wait; with the flag off the
 	// classic MPI-distributed CPU assembly is used.
 	static char gUseGpuAsm;
+	// Which backend serviced the most recent interaction-matrix assembly:
+	// -1 = none yet, 0 = CPU, 1 = GPU. Diagnostic (rad.UtiAsmLastBackend()).
+	static char gLastAsmBackend;
 
 	radTInteraction(const radThg&, const radThg&, const radTCompCriterium&, short =0, char =0, char =0, int =-1, int =0); //OC08012020
 	//radTInteraction(const radThg&, const radThg&, const radTCompCriterium&, short =0, char =0, char =0);

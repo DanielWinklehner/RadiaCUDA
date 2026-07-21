@@ -83,6 +83,7 @@ void MvsH( int, char*, double,double,double );
 
 void PreRelax( int, int );
 void RadSetGpuAsmEnabled( int ); //RadiaCUDA: GPU IM-assembly switch (radintrc.cpp)
+int RadGetLastAsmBackend(); //RadiaCUDA: backend of the most recent IM assembly (radintrc.cpp)
 void ShowInteractMatrix(int);
 void ShowInteractVector(int, char*);
 void ManualRelax( int, int, int, double );
@@ -1743,6 +1744,14 @@ int CALL RadUtiVer(double* d)
 int CALL RadUtiFldLastBackend(int* pBackend)
 {
 	*pBackend = g_LastFldBackend;
+	return 0;
+}
+
+//-------------------------------------------------------------------------
+
+int CALL RadUtiAsmLastBackend(int* pBackend)
+{
+	*pBackend = RadGetLastAsmBackend();
 	return 0;
 }
 

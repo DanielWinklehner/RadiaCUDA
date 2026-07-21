@@ -83,6 +83,7 @@ RadUtiDelAll
 RadUtiIntrptTim
 RadUtiVer
 RadUtiFldLastBackend
+RadUtiAsmLastBackend
 RadUtiDmp
 RadUtiDmpSize
 RadUtiYeldFuncSet

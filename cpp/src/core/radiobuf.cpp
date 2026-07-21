@@ -181,7 +181,7 @@ string radTIOBuffer::warn_ar[] = {
 	"Radia::Warning017::::A symbol was supplied to field computation function, in place where a number was expected; the symbol was replaced by 0.\0",
 	"Radia::Warning018::::Current density scaling was not performed because no current-carrying 3D objects were found.\0",
 	"Radia::Warning019::::MPI is not supported in this version of code; MPI-related command(s) ignored.\0",
-	"Radia::Warning020::::GPU interaction-matrix assembly is not available for this model (unsupported or mixed element types); computation performed on CPU.\0",
+	"Radia::Warning020::::GPU interaction-matrix assembly is not available for this model (an element is neither a polyhedron nor a RecMag); computation performed on CPU.\0",
 	"Radia::Warning021::::GPU interaction-matrix assembly could not be completed (e.g. insufficient GPU memory); computation performed on CPU.\0",
 	"Radia::Warning022::::GPU relaxation solve does not support anisotropic linear materials (KsiPar != KsiPerp); computation performed on CPU.\0",
 	"Radia::Warning023::::GPU relaxation solve does not support staged (sub-interval) relaxation; computation performed on CPU.\0",
