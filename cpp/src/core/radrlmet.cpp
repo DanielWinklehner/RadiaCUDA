@@ -1274,9 +1274,21 @@ int radTRelaxationMethNo_10::AutoRelax(double PrecOnMagnetiz, int MaxIterNumber,
 		//Jacobi pass: quasi-external field of every element from the CURRENT
 		//magnetizations, then the implicit per-element solve; proposed new
 		//magnetizations are collected in PropMagnAr (MagnAr untouched until
-		//the whole pass is done).
+		//the whole pass is done). OpenMP-parallel: every element is
+		//independent (reads shared MagnAr/matrix, writes only its own
+		//NewFieldAr/PropMagnAr slots; material evaluation is read-only) --
+		//this O(N^2) pass is ~all of the cost and is the CPU-fallback path
+		//when the interaction matrix exceeds GPU memory.
+#ifdef _OPENMP
+		#pragma omp parallel for schedule(static)
+#endif
 		for(int StrNo=0; StrNo<LocAmOfMainElem; StrNo++)
 		{
+			TVector3d E_Str0L(1.,0.,0.), E_Str1L(0.,1.,0.), E_Str2L(0.,0.,1.);
+			TMatrix3d E(E_Str0L, E_Str1L, E_Str2L);
+			TMatrix3d BufMatr, InvBufMatr, MultByInstKsi;
+			TVector3d MultByInstMr;
+
 			TMatrix3df* MatrRow = IntrcMat[StrNo];
 
 			TVector3d QuasiExtFieldAtElemStrNo(0.,0.,0.);

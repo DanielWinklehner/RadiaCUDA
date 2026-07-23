@@ -81,6 +81,13 @@ endif()
 # Link FFTW
 target_link_libraries(radia_core PUBLIC ${FFTW3F_LIB})
 
+# OpenMP: parallelizes the O(N^2) CPU relaxation pass (method 10) -- the
+# fallback path when the interaction matrix exceeds GPU memory.
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(radia_core PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
 # MPI
 if(RADIA_WITH_MPI)
     target_compile_definitions(radia_core PUBLIC _WITH_MPI)

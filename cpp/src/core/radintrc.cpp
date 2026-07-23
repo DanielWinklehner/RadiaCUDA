@@ -20,6 +20,7 @@
 
 #ifdef RADIA_WITH_CUDA
 #include "radgpu_asm.h"
+#include "radgpu_fld.h"
 #endif
 
 #ifdef _WITH_MPI
@@ -30,10 +31,12 @@
 //-------------------------------------------------------------------------
 
 char radTInteraction::gUseGpuAsm = 1; //RadiaCUDA: GPU IM assembly on by default
+char radTInteraction::gLastAsmBackend = -1; //RadiaCUDA: -1 = no assembly yet, 0 = CPU, 1 = GPU
 
 //RadiaCUDA: C-linkage bridge so the entry layer (radentry.cpp) can set the
 //GPU-assembly flag without pulling in this header's include chain.
 extern "C" void RadSetGpuAsmEnabled(int on) { radTInteraction::gUseGpuAsm = on ? 1 : 0; }
+extern "C" int RadGetLastAsmBackend() { return (int)radTInteraction::gLastAsmBackend; }
 
 //-------------------------------------------------------------------------
 
@@ -511,6 +514,8 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 	radTFieldKey FieldKeyInteract; FieldKeyInteract.B_=FieldKeyInteract.H_=FieldKeyInteract.PreRelax_=1;
 	TVector3d ZeroVect(0.,0.,0.);
 
+	gLastAsmBackend = 0; //RadiaCUDA diagnostic: set to 1 below iff GPU assembly succeeds
+
 	//--New
 	int AmOfElemWithSym = CountRelaxElemsWithSym();
 	//--EndNew
@@ -563,7 +568,7 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 			if(MPI_Bcast(&gpuAsmOK, 1, MPI_INT, 0, MPI_COMM_WORLD) != MPI_SUCCESS) { Send.ErrorMessage("Radia::Error601"); return 0; }
 		}
 #endif
-		if(gpuAsmOK) return 1;
+		if(gpuAsmOK) { gLastAsmBackend = 1; return 1;}
 		//else: fall through to the CPU assembly (serial or MPI-distributed),
 		//consistently on all ranks.
 	}
@@ -962,24 +967,59 @@ void radTInteraction::SetupExternFieldArray()
 
 void radTInteraction::AddExternFieldFromMoreExtSource()
 {
-	if(MoreExtSourceHandle.rep != 0)
+	if(MoreExtSourceHandle.rep == 0) return;
+
+#ifdef RADIA_WITH_CUDA
+	// GPU field eval for the frozen external source (rad.RlxPre srcobj). The
+	// CPU loop below evaluates the source's field at every relaxable element
+	// one point at a time via radTg3d::B_genComp; when the source is large
+	// (e.g. a whole solved machine as the frozen background for a small
+	// perturbative part) this dominates the setup. radGPU_ComputeField sums
+	// the same source on the GPU. It returns B, which equals the H the CPU
+	// path adds at points OUTSIDE the source material (in radia's Tesla
+	// convention B = H + M, and M = 0 outside the source) -- true for the
+	// frozen-background use case, where the relaxable elements are disjoint
+	// from the source. Gated to gpu-assembly-on AND a single MPI rank:
+	// radGPU_ComputeField MPI_Bcasts (collective), but this method runs on
+	// rank 0 only, so calling it under nProc>=2 would deadlock -- multi-rank
+	// keeps the CPU path.
+	if(gUseGpuAsm && AmOfMainElem > 0 && m_nProcMPI < 2)
 	{
-		radTFieldKey FieldKeyExtern; FieldKeyExtern.H_=1;
-		TVector3d ZeroVect(0.,0.,0.), InitObsPoiVect(0.,0.,0.);
-
-		for(int StrNo=0; StrNo<AmOfMainElem; StrNo++) 
+		double* arObs = new double[3*AmOfMainElem];
+		double* arB = new double[3*AmOfMainElem];
+		for(int StrNo=0; StrNo<AmOfMainElem; StrNo++)
 		{
-			radTrans* ATransPtr = MainTransPtrArray[StrNo];
-
-			InitObsPoiVect = MainTransPtrArray[StrNo]->TrPoint((g3dRelaxPtrVect[StrNo])->CentrPoint);
-			radTField Field(FieldKeyExtern, CompCriterium, InitObsPoiVect, ZeroVect, ZeroVect, ZeroVect, ZeroVect, 0.); // Improve
-
-			((radTg3d*)(MoreExtSourceHandle.rep))->B_genComp(&Field);
-
-			//TVector3d BufVect = ExternFieldArray[StrNo];
-
-			ExternFieldArray[StrNo] += MainTransPtrArray[StrNo]->TrVectField_inv(Field.H);
+			TVector3d P = MainTransPtrArray[StrNo]->TrPoint((g3dRelaxPtrVect[StrNo])->CentrPoint);
+			arObs[3*StrNo] = P.x; arObs[3*StrNo+1] = P.y; arObs[3*StrNo+2] = P.z;
 		}
+		int rc = radGPU_ComputeFieldFromSrcRep((void*)(MoreExtSourceHandle.rep),
+		                                       arObs, AmOfMainElem, arB, 1); // fp64
+		if(rc == 0)
+		{
+			for(int StrNo=0; StrNo<AmOfMainElem; StrNo++)
+			{
+				TVector3d Blab(arB[3*StrNo], arB[3*StrNo+1], arB[3*StrNo+2]);
+				ExternFieldArray[StrNo] += MainTransPtrArray[StrNo]->TrVectField_inv(Blab);
+			}
+			delete[] arObs; delete[] arB;
+			return; // GPU path succeeded
+		}
+		delete[] arObs; delete[] arB;
+		// rc != 0: GPU unavailable / unsupported source -> CPU fallback below
+	}
+#endif
+
+	radTFieldKey FieldKeyExtern; FieldKeyExtern.H_=1;
+	TVector3d ZeroVect(0.,0.,0.), InitObsPoiVect(0.,0.,0.);
+
+	for(int StrNo=0; StrNo<AmOfMainElem; StrNo++)
+	{
+		InitObsPoiVect = MainTransPtrArray[StrNo]->TrPoint((g3dRelaxPtrVect[StrNo])->CentrPoint);
+		radTField Field(FieldKeyExtern, CompCriterium, InitObsPoiVect, ZeroVect, ZeroVect, ZeroVect, ZeroVect, 0.); // Improve
+
+		((radTg3d*)(MoreExtSourceHandle.rep))->B_genComp(&Field);
+
+		ExternFieldArray[StrNo] += MainTransPtrArray[StrNo]->TrVectField_inv(Field.H);
 	}
 }
 

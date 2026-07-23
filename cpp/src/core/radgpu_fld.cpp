@@ -856,4 +856,25 @@ int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int us
     return gpuSuccess;
 }
 
+//-------------------------------------------------------------------------
+
+int radGPU_ComputeFieldFromSrcRep(void* srcRepPtr, double* arCoord, int nP, double* arB, int use_gpu)
+{
+    if(srcRepPtr == nullptr || nP <= 0) return -1;
+
+    // Reverse-look-up the source object's global index from its handle rep
+    // pointer (the relaxation only holds the handle, radGPU_ComputeField wants
+    // the index). The map is small and this runs once per RlxPre.
+    extern radTApplication rad;
+    int indObj = 0;
+    for(radTmhg::const_iterator it = rad.GlobalMapOfHandlers.begin();
+        it != rad.GlobalMapOfHandlers.end(); ++it)
+    {
+        if((void*)(it->second.rep) == srcRepPtr) { indObj = it->first; break; }
+    }
+    if(indObj == 0) return -1;
+
+    return radGPU_ComputeField(indObj, arCoord, nP, arB, use_gpu);
+}
+
 #endif // RADIA_WITH_CUDA

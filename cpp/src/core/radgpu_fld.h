@@ -183,5 +183,19 @@ int radGPU_FldRecMagRetrieveAndFree(RadGPUFieldRecMagData* data);
 //-------------------------------------------------------------------------
 int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int use_gpu=1);
 
+//-------------------------------------------------------------------------
+// Convenience wrapper for the relaxation external-field setup
+// (radTInteraction::AddExternFieldFromMoreExtSource, i.e. rad.RlxPre srcobj):
+// compute the field from a frozen source object identified by its handle rep
+// pointer at the relaxable-element observation points, by reverse-looking-up
+// the object's global index and delegating to radGPU_ComputeField.
+//
+// Returns 0 on success (arB filled with B, which equals H outside the source),
+// nonzero on failure (caller falls back to the CPU field loop). Intended for
+// single-process use -- the caller gates on MPI size, and the MPI collective
+// inside radGPU_ComputeField is a no-op at size 1.
+//-------------------------------------------------------------------------
+int radGPU_ComputeFieldFromSrcRep(void* srcRepPtr, double* arCoord, int nP, double* arB, int use_gpu=1);
+
 #endif // RADIA_WITH_CUDA
 #endif // RADGPU_FLD_H

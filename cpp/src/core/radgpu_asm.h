@@ -17,16 +17,18 @@
 //#define RADGPU_MAX_SYM_COPIES 64
 
 // ============================================================
-// Flat geometry for GPU: polyhedron elements
+// Flat geometry for GPU: polyhedron faces (mixed models supported).
+// Arrays are indexed by the GLOBAL element index 0..n_elem-1; RecMag
+// elements simply have an empty face range in face_offsets.
 // ============================================================
 struct RadGPU_PolyData {
-    int n_elem;
+    int n_elem;             // TOTAL relaxable elements N (poly + RecMag)
     int n_faces_total;
     int n_edges_total;
 
     // Per-element
-    double* centers;        // [3 * n_elem] element centers
-    int* face_offsets;      // [n_elem + 1] CSR into face arrays
+    double* centers;        // [3 * n_elem] transformed observation centers (all elements)
+    int* face_offsets;      // [n_elem + 1] CSR into face arrays (empty range for RecMags)
 
     // Per-face
     int* edge_offsets;      // [n_faces_total + 1] CSR into edge arrays
@@ -39,13 +41,22 @@ struct RadGPU_PolyData {
 };
 
 // ============================================================
-// Flat geometry for GPU: RecMag elements
+// Flat geometry for GPU: RecMag elements (mixed models supported).
+// Arrays indexed by GLOBAL element index; entries of non-RecMag
+// elements are zero and never read (guarded by is_rec).
 // ============================================================
 struct RadGPU_RecMagData {
-    int n_elem;
-    double* centers;        // [3 * n_elem]
-    double* dims;           // [3 * n_elem] half-widths
-    double* obs_centers;    // [3 * n_elem] observation centers (may differ with symmetry)
+    int n_rec;              // number of RecMag elements (0 = pure-polyhedron model)
+    int* is_rec;            // [n_elem] 1 if element is a RecMag
+    double* centers;        // [3 * n_elem] cuboid centers, element's own frame
+    double* dims;           // [3 * n_elem] FULL edge lengths (radTRecMag::Dimensions)
+    // Snapshot of radCR (radTConvergRepair) tolerances: the closed-form cuboid
+    // Q-tensor uses AbsRandMagnitude-based guards on face/edge coincidences,
+    // which must match the CPU B_comp exactly for parity.
+    double abs_rand;
+    double rel_rand;
+    double zero_rand;
+    int act_on_doubles;
 };
 
 // ============================================================

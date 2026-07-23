@@ -5,7 +5,9 @@
 * Project:        RADIA
 *
 * Description:    GPU-accelerated interaction matrix assembly
-*                 Polyhedron field via flat polygon face integrals
+*                 Polyhedron field via flat polygon face integrals;
+*                 RecMag (cuboid) field via the closed-form Q-tensor.
+*                 Mixed models supported (per-source-type branch).
 *
 -------------------------------------------------------------------------*/
 
@@ -223,6 +225,168 @@ __device__ void polygon_prerelax_dev(
 }
 
 // ============================================================
+// Device: TransAtans with radTg3d::TransAtans semantics (radg3d.h:938).
+// NOTE: differs from TransAtans_dev above (which matches the CPU flat-polygon
+// code) in the degenerate 1-x*y==0 branch. The RecMag closed form calls the
+// radTg3d version on the CPU, so the port must use these exact semantics.
+// ============================================================
+__device__ double TransAtansRec_dev(double x, double y, double& PiMult)
+{
+    double Buf = 1. - x * y;
+    if(Buf == 0.) Buf = 1.e-50;
+    PiMult = (((Buf > 0)? 0.:1.) * ((x < 0)? -1.:1.));
+    return (x + y) / Buf;
+}
+
+// ============================================================
+// Device: radTConvergRepair::AbsRandMagnitude (radcnvrg.h:85) --
+// deterministic despite the name: max(RelRand*A, AbsRand), with the
+// ZeroRand floor when A==0. Tolerances are passed in from the host's
+// radCR snapshot so runtime changes (rad.FldCmpCrt) are honored.
+// ============================================================
+__device__ double AbsRandMag_dev(double A,
+    double AbsRand, double RelRand, double ZeroRand, int ActOnDoubles)
+{
+    if(!ActOnDoubles) return 0.;
+    double AbsFromRel = RelRand * A;
+    double AbsMax = (AbsFromRel < AbsRand)? AbsRand : AbsFromRel;
+    return (A != 0.)? AbsMax : ((AbsMax < ZeroRand)? ZeroRand : AbsMax);
+}
+
+// ============================================================
+// Device: RecMag (uniformly magnetized cuboid) PreRelax Q-tensor.
+// Exact port of the radTRecMag::B_comp exact branch (radrec.cpp:80-301)
+// for the assembly field key (B_ | H_ | PreRelax_; no A_/Phi_/J):
+//   Q = [ T.x  -S.z  -S.y ]
+//       [-S.z   T.y  -S.x ]     (rows = Field.B / Field.H / Field.A)
+//       [-S.y  -S.x   T.z ]
+// The multipole branch never fires during assembly (MltplThresh[] are all 0,
+// radg3d.h:483), so only the exact closed form is needed.
+// obs is the observation point in the SOURCE element's own frame.
+// ============================================================
+__device__ void recmag_prerelax_dev(
+    double obs_x, double obs_y, double obs_z,
+    double cen_x, double cen_y, double cen_z,
+    double dim_x, double dim_y, double dim_z,   // FULL edge lengths
+    double AbsRand, double RelRand, double ZeroRand, int ActOnDoubles,
+    double* Q)                                   // [9] row-major output
+{
+    double Px = obs_x - cen_x;                   // P_min_CenPo
+    double Py = obs_y - cen_y;
+    double Pz = obs_z - cen_z;
+    double HalfDimX = 0.5 * dim_x;
+    double HalfDimY = 0.5 * dim_y;
+    double HalfDimZ = 0.5 * dim_z;
+
+    // BfSt: source-corner coordinates relative to the observation point,
+    // with the on-border jitter repair (radrec.cpp:84-97)
+    double x0 = -Px - HalfDimX, x1 = -Px + HalfDimX;
+    double y0 = -Py - HalfDimY, y1 = -Py + HalfDimY;
+    double z0 = -Pz - HalfDimZ, z1 = -Pz + HalfDimZ;
+    if(x0 == 0.) x0 = AbsRandMag_dev(HalfDimX, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    if(y0 == 0.) y0 = AbsRandMag_dev(HalfDimY, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    if(z0 == 0.) z0 = AbsRandMag_dev(HalfDimZ, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    if(x1 == 0.) x1 = AbsRandMag_dev(HalfDimX, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    if(y1 == 0.) y1 = AbsRandMag_dev(HalfDimY, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    if(z1 == 0.) z1 = AbsRandMag_dev(HalfDimZ, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+
+    double x0e2 = x0*x0, x1e2 = x1*x1;
+    double y0e2 = y0*y0, y1e2 = y1*y1;
+    double z0e2 = z0*z0, z1e2 = z1*z1;
+
+    double D000 = sqrt(x0e2+y0e2+z0e2);
+    double D100 = sqrt(x1e2+y0e2+z0e2);
+    double D010 = sqrt(x0e2+y1e2+z0e2);
+    double D110 = sqrt(x1e2+y1e2+z0e2);
+    double D001 = sqrt(x0e2+y0e2+z1e2);
+    double D101 = sqrt(x1e2+y0e2+z1e2);
+    double D011 = sqrt(x0e2+y1e2+z1e2);
+    double D111 = sqrt(x1e2+y1e2+z1e2);
+
+    const double Pi = 3.141592653589793238;
+    double PiMult1, PiMult2, PiMult3;
+
+    double T0x = atan(TransAtansRec_dev(TransAtansRec_dev(y0*z0/(x0*D000), -y0*z1/(x0*D001), PiMult1),
+                       TransAtansRec_dev(-y1*z0/(x0*D010), y1*z1/(x0*D011), PiMult2), PiMult3))+Pi*(PiMult1+PiMult2+PiMult3);
+    double T1x = atan(TransAtansRec_dev(TransAtansRec_dev(-y0*z0/(x1*D100), y0*z1/(x1*D101), PiMult1),
+                       TransAtansRec_dev(y1*z0/(x1*D110), -y1*z1/(x1*D111), PiMult2), PiMult3))+Pi*(PiMult1+PiMult2+PiMult3);
+    double T0y = atan(TransAtansRec_dev(TransAtansRec_dev(x0*z0/(y0*D000), -x0*z1/(y0*D001), PiMult1),
+                       TransAtansRec_dev(-x1*z0/(y0*D100), x1*z1/(y0*D101), PiMult2), PiMult3))+Pi*(PiMult1+PiMult2+PiMult3);
+    double T1y = atan(TransAtansRec_dev(TransAtansRec_dev(-x0*z0/(y1*D010), x0*z1/(y1*D011), PiMult1),
+                       TransAtansRec_dev(x1*z0/(y1*D110), -x1*z1/(y1*D111), PiMult2), PiMult3))+Pi*(PiMult1+PiMult2+PiMult3);
+    double T0z = atan(TransAtansRec_dev(TransAtansRec_dev(x0*y0/(z0*D000), -x1*y0/(z0*D100), PiMult1),
+                       TransAtansRec_dev(-x0*y1/(z0*D010), x1*y1/(z0*D110), PiMult2), PiMult3))+Pi*(PiMult1+PiMult2+PiMult3);
+    double T1z = atan(TransAtansRec_dev(TransAtansRec_dev(-x0*y0/(z1*D001), x1*y0/(z1*D101), PiMult1),
+                       TransAtansRec_dev(x0*y1/(z1*D011), -x1*y1/(z1*D111), PiMult2), PiMult3))+Pi*(PiMult1+PiMult2+PiMult3);
+
+    double AbsRandD000 = 10.*AbsRandMag_dev(D000, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    double AbsRandD010 = 10.*AbsRandMag_dev(D010, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    double AbsRandD001 = 10.*AbsRandMag_dev(D001, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    double AbsRandD011 = 10.*AbsRandMag_dev(D011, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    double AbsRandD100 = 10.*AbsRandMag_dev(D100, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    double AbsRandD110 = 10.*AbsRandMag_dev(D110, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    double AbsRandD101 = 10.*AbsRandMag_dev(D101, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+    double AbsRandD111 = 10.*AbsRandMag_dev(D111, AbsRand, RelRand, ZeroRand, ActOnDoubles);
+
+    // Catastrophic-cancellation guards on the log arguments (radrec.cpp:156-181):
+    // when c+D ~ 0 the exact expression is replaced by its series limit.
+    double z0plD100 = z0+D100; if(z0plD100 < AbsRandD100) z0plD100 = 0.5*(x1e2 + y0e2)/fabs(z0);
+    double z1plD101 = z1+D101; if(z1plD101 < AbsRandD101) z1plD101 = 0.5*(x1e2 + y0e2)/fabs(z1);
+    double z1plD001 = z1+D001; if(z1plD001 < AbsRandD001) z1plD001 = 0.5*(x0e2 + y0e2)/fabs(z1);
+    double z0plD000 = z0+D000; if(z0plD000 < AbsRandD000) z0plD000 = 0.5*(x0e2 + y0e2)/fabs(z0);
+    double z0plD010 = z0+D010; if(z0plD010 < AbsRandD010) z0plD010 = 0.5*(x0e2 + y1e2)/fabs(z0);
+    double z1plD011 = z1+D011; if(z1plD011 < AbsRandD011) z1plD011 = 0.5*(x0e2 + y1e2)/fabs(z1);
+    double z1plD111 = z1+D111; if(z1plD111 < AbsRandD111) z1plD111 = 0.5*(x1e2 + y1e2)/fabs(z1);
+    double z0plD110 = z0+D110; if(z0plD110 < AbsRandD110) z0plD110 = 0.5*(x1e2 + y1e2)/fabs(z0);
+
+    double y0plD100 = y0+D100; if(y0plD100 < AbsRandD100) y0plD100 = 0.5*(x1e2 + z0e2)/fabs(y0);
+    double y1plD110 = y1+D110; if(y1plD110 < AbsRandD110) y1plD110 = 0.5*(x1e2 + z0e2)/fabs(y1);
+    double y1plD010 = y1+D010; if(y1plD010 < AbsRandD010) y1plD010 = 0.5*(x0e2 + z0e2)/fabs(y1);
+    double y0plD000 = y0+D000; if(y0plD000 < AbsRandD000) y0plD000 = 0.5*(x0e2 + z0e2)/fabs(y0);
+    double y0plD001 = y0+D001; if(y0plD001 < AbsRandD001) y0plD001 = 0.5*(x0e2 + z1e2)/fabs(y0);
+    double y1plD011 = y1+D011; if(y1plD011 < AbsRandD011) y1plD011 = 0.5*(x0e2 + z1e2)/fabs(y1);
+    double y1plD111 = y1+D111; if(y1plD111 < AbsRandD111) y1plD111 = 0.5*(x1e2 + z1e2)/fabs(y1);
+    double y0plD101 = y0+D101; if(y0plD101 < AbsRandD101) y0plD101 = 0.5*(x1e2 + z1e2)/fabs(y0);
+
+    double x0plD010 = x0+D010; if(x0plD010 < AbsRandD010) x0plD010 = 0.5*(y1e2 + z0e2)/fabs(x0);
+    double x1plD110 = x1+D110; if(x1plD110 < AbsRandD110) x1plD110 = 0.5*(y1e2 + z0e2)/fabs(x1);
+    double x1plD100 = x1+D100; if(x1plD100 < AbsRandD100) x1plD100 = 0.5*(y0e2 + z0e2)/fabs(x1);
+    double x0plD000 = x0+D000; if(x0plD000 < AbsRandD000) x0plD000 = 0.5*(y0e2 + z0e2)/fabs(x0);
+    double x0plD001 = x0+D001; if(x0plD001 < AbsRandD001) x0plD001 = 0.5*(y0e2 + z1e2)/fabs(x0);
+    double x1plD101 = x1+D101; if(x1plD101 < AbsRandD101) x1plD101 = 0.5*(y0e2 + z1e2)/fabs(x1);
+    double x1plD111 = x1+D111; if(x1plD111 < AbsRandD111) x1plD111 = 0.5*(y1e2 + z1e2)/fabs(x1);
+    double x0plD011 = x0+D011; if(x0plD011 < AbsRandD011) x0plD011 = 0.5*(y1e2 + z1e2)/fabs(x0);
+
+    double x0plD010_di_x1plD110 = x0plD010/x1plD110;
+    double x1plD100_di_x0plD000 = x1plD100/x0plD000;
+    double x0plD001_di_x1plD101 = x0plD001/x1plD101;
+    double x1plD111_di_x0plD011 = x1plD111/x0plD011;
+    double y0plD100_di_y1plD110 = y0plD100/y1plD110;
+    double y1plD010_di_y0plD000 = y1plD010/y0plD000;
+    double y0plD001_di_y1plD011 = y0plD001/y1plD011;
+    double y1plD111_di_y0plD101 = y1plD111/y0plD101;
+    double z0plD100_di_z1plD101 = z0plD100/z1plD101;
+    double z1plD001_di_z0plD000 = z1plD001/z0plD000;
+    double z0plD010_di_z1plD011 = z0plD010/z1plD011;
+    double z1plD111_di_z0plD110 = z1plD111/z0plD110;
+
+    // PreRelax has no A_/Phi_ keys -> product-then-log branch (radrec.cpp:281-283)
+    double Sx = -log(x0plD010_di_x1plD110*x1plD100_di_x0plD000*x0plD001_di_x1plD101*x1plD111_di_x0plD011);
+    double Sy = -log(y0plD100_di_y1plD110*y1plD010_di_y0plD000*y0plD001_di_y1plD011*y1plD111_di_y0plD101);
+    double Sz = -log(z0plD100_di_z1plD101*z1plD001_di_z0plD000*z0plD010_di_z1plD011*z1plD111_di_z0plD110);
+
+    const double dConst2 = 1./4./Pi;
+    double Tx = dConst2*(T0x + T1x);
+    double Ty = dConst2*(T0y + T1y);
+    double Tz = dConst2*(T0z + T1z);
+    Sx *= dConst2; Sy *= dConst2; Sz *= dConst2;
+
+    Q[0] = Tx;  Q[1] = -Sz; Q[2] = -Sy;
+    Q[3] = -Sz; Q[4] = Ty;  Q[5] = -Sx;
+    Q[6] = -Sy; Q[7] = -Sx; Q[8] = Tz;
+}
+
+// ============================================================
 // Device: 3x3 matrix multiply C = A * B (row-major)
 // ============================================================
 __device__ void matmul3x3(const double* A, const double* B, double* C)
@@ -248,22 +412,29 @@ __device__ void transpose3x3(const double* A, double* AT)
 }
 
 // ============================================================
-// Kernel: Assemble interaction matrix for polyhedra
-// One thread per (obs_elem, src_elem) pair
+// Kernel: Assemble interaction matrix, mixed element types.
+// One thread per (obs_elem, src_elem) pair. The Q block depends only on
+// the SOURCE element's type (the observer contributes just its center
+// point), so a per-source branch covers RecMag<->RecMag, poly<->poly and
+// both cross blocks alike.
 // ============================================================
-__global__ void assemble_poly_kernel(
+__global__ void assemble_mixed_kernel(
     int N,
     const double* __restrict__ obs_centers,    // [N*3] transformed observation centers
     const double* __restrict__ src_centers,     // [N*3] raw element centers
-    const int* __restrict__ face_offsets,       // [N+1]
+    const int* __restrict__ face_offsets,       // [N+1] (empty range for RecMags)
     const int* __restrict__ edge_offsets,       // [n_faces_total+1]
     const double* __restrict__ face_cz,         // [n_faces_total]
     const double* __restrict__ face_rot,        // [n_faces_total*9] lab->local rotation
     const double* __restrict__ face_orig,       // [n_faces_total*3] face origin in lab
     const double* __restrict__ edge_pts_2d,     // [n_edges_total*2]
-    //int n_sym,
-    //const double* __restrict__ sym_point_tr,    // [n_sym*9]
-    //const double* __restrict__ sym_field_tr,    // [n_sym*9]
+    const int* __restrict__ is_rec,             // [N] 1 = RecMag source
+    const double* __restrict__ rec_centers,     // [N*3] cuboid centers (own frame)
+    const double* __restrict__ rec_dims,        // [N*3] cuboid FULL dimensions
+    double rec_abs_rand,                        // radCR tolerance snapshot
+    double rec_rel_rand,
+    double rec_zero_rand,
+    int rec_act_on_doubles,
     const int* __restrict__ sym_counts,
     const int* __restrict__ sym_offsets,
     const double* __restrict__ sym_point_tr,
@@ -292,13 +463,9 @@ __global__ void assemble_poly_kernel(
     // Accumulate 3x3 block over symmetry copies
     double block[9] = {0,0,0, 0,0,0, 0,0,0};
 
+    int srcIsRec = is_rec[src_idx];
     int fStart = face_offsets[src_idx];
     int fEnd   = face_offsets[src_idx + 1];
-
-//     for(int sc = 0; sc < n_sym; sc++)
-//     {
-//         const double* ptMat = &sym_point_tr[sc * 9];  // maps obs into this copy's frame
-//         const double* ftMat = &sym_field_tr[sc * 9];   // maps field back to lab
 
     int n_sym_j = sym_counts[src_idx];
     int sym_off = sym_offsets[src_idx];
@@ -315,6 +482,27 @@ __global__ void assemble_poly_kernel(
             ptMat[6]*obs_lab[0] + ptMat[7]*obs_lab[1] + ptMat[8]*obs_lab[2]
         };
 
+        double sum_block[9] = {0,0,0, 0,0,0, 0,0,0};
+
+        if(srcIsRec)
+        {
+            // RecMag source: closed-form cuboid Q at the transformed obs point,
+            // exactly as the CPU's radTRecMag::B_comp PreRelax branch.
+            recmag_prerelax_dev(
+                obs_copy[0], obs_copy[1], obs_copy[2],
+                rec_centers[3*src_idx], rec_centers[3*src_idx+1], rec_centers[3*src_idx+2],
+                rec_dims[3*src_idx], rec_dims[3*src_idx+1], rec_dims[3*src_idx+2],
+                rec_abs_rand, rec_rel_rand, rec_zero_rand, rec_act_on_doubles,
+                sum_block);
+
+            // Apply symmetry field transform and accumulate (same as poly path below)
+            double result[9];
+            matmul3x3(ftMat, sum_block, result);
+            for(int k = 0; k < 9; k++) block[k] += result[k];
+            continue;
+        }
+
+        // Polyhedron source:
         // For each unit magnetization direction, compute field from all faces
         // PreRelax_ mode: B_comp returns a matrix Q where column c = field from M = e_c
         // For polygon: Q has only z-column nonzero: Q = [0,0,-Sx*C; 0,0,-Sy*C; 0,0,-Sz*C]
@@ -326,8 +514,6 @@ __global__ void assemble_poly_kernel(
         // Sum over faces of source element
         // Each face produces Sx, Sy, Sz in its local frame
         // Then we form Q_face, apply face transform, and sum
-
-        double sum_block[9] = {0,0,0, 0,0,0, 0,0,0};
 
         for(int fi = fStart; fi < fEnd; fi++)
         {
@@ -403,22 +589,6 @@ __global__ void assemble_poly_kernel(
 }
 
 // ============================================================
-// Host: RecMag kernel (placeholder - not yet implemented)
-// ============================================================
-__global__ void assemble_recmag_kernel(
-    int N,
-    const double* __restrict__ centers,
-    const double* __restrict__ dims,
-    const double* __restrict__ obs_centers,
-    int n_sym,
-    const double* __restrict__ sym_point_tr,
-    const double* __restrict__ sym_field_tr,
-    float* __restrict__ out_blocks)
-{
-    // TODO: implement RecMag kernel
-}
-
-// ============================================================
 // Host: Launch assembly
 // ============================================================
 
@@ -445,12 +615,8 @@ int radGPU_AssembleMatrix(
     RadGPU_SymData* symData,
     RadGPU_AsmResult* result)
 {
-    int N = 0;
-    bool usePoly = false;
-
-    if(polyData && polyData->n_elem > 0) { N = polyData->n_elem; usePoly = true; }
-    else if(recData && recData->n_elem > 0) { N = recData->n_elem; }
-    else return -1;
+    if(!polyData || polyData->n_elem <= 0 || !recData) return -1;
+    int N = polyData->n_elem;  // total elements (poly + RecMag; see packing)
 
     long long totalPairs = (long long)N * N;
 
@@ -487,18 +653,19 @@ int radGPU_AssembleMatrix(
 
     int rc = 0;
 
-    if(usePoly)
     {
-        // Upload poly data to GPU. All device pointers are nullptr-initialized so the
+        // Upload geometry to GPU. All device pointers are nullptr-initialized so the
         // `cleanup` label can cudaFree() them unconditionally on any error path.
         double *d_obs=nullptr, *d_centers=nullptr, *d_face_cz=nullptr, *d_face_rot=nullptr,
                *d_face_orig=nullptr, *d_edge_pts=nullptr;
         int *d_face_offsets=nullptr, *d_edge_offsets=nullptr;
+        int *d_is_rec=nullptr;
+        double *d_rec_centers=nullptr, *d_rec_dims=nullptr;
         float *d_out=nullptr;
         int *d_sym_counts=nullptr, *d_sym_offsets=nullptr;
         double *d_sym_pt=nullptr, *d_sym_ft=nullptr;
 
-        int nFaces = polyData->n_faces_total;
+        int nFaces = polyData->n_faces_total;   // 0 for a pure-RecMag model
         int nEdges = polyData->n_edges_total;
         int totalCopies = symData->total_copies;
 
@@ -507,14 +674,23 @@ int radGPU_AssembleMatrix(
         long long gridSize = (totalPairs + blockSize - 1) / blockSize;
 
         // size_t casts keep the byte counts 64-bit (d_out is N*N*9 floats).
+        // Face/edge counts can be 0 (pure-RecMag model): pad to 1 element so
+        // cudaMalloc never sees a zero-byte request (a 0-byte cudaMalloc returns
+        // a nullptr that CU_TRY-guarded cudaMemcpy would then reject).
+        size_t nFacesAlloc = (nFaces > 0)? (size_t)nFaces : 1;
+        size_t nEdgesAlloc = (nEdges > 0)? (size_t)nEdges : 1;
+
         CU_MALLOC(d_obs,          3*(size_t)N*sizeof(double));
         CU_MALLOC(d_centers,      3*(size_t)N*sizeof(double));
         CU_MALLOC(d_face_offsets, ((size_t)N+1)*sizeof(int));
-        CU_MALLOC(d_edge_offsets, ((size_t)nFaces+1)*sizeof(int));
-        CU_MALLOC(d_face_cz,      (size_t)nFaces*sizeof(double));
-        CU_MALLOC(d_face_rot,     9*(size_t)nFaces*sizeof(double));
-        CU_MALLOC(d_face_orig,    3*(size_t)nFaces*sizeof(double));
-        CU_MALLOC(d_edge_pts,     2*(size_t)nEdges*sizeof(double));
+        CU_MALLOC(d_edge_offsets, (nFacesAlloc+1)*sizeof(int));
+        CU_MALLOC(d_face_cz,      nFacesAlloc*sizeof(double));
+        CU_MALLOC(d_face_rot,     9*nFacesAlloc*sizeof(double));
+        CU_MALLOC(d_face_orig,    3*nFacesAlloc*sizeof(double));
+        CU_MALLOC(d_edge_pts,     2*nEdgesAlloc*sizeof(double));
+        CU_MALLOC(d_is_rec,       (size_t)N*sizeof(int));
+        CU_MALLOC(d_rec_centers,  3*(size_t)N*sizeof(double));
+        CU_MALLOC(d_rec_dims,     3*(size_t)N*sizeof(double));
         CU_MALLOC(d_out,          totalPairs*9*sizeof(float));
         CU_MALLOC(d_sym_counts,   (size_t)N*sizeof(int));
         CU_MALLOC(d_sym_offsets,  ((size_t)N+1)*sizeof(int));
@@ -525,19 +701,29 @@ int radGPU_AssembleMatrix(
         CU_TRY(cudaMemcpy(d_centers,      polyData->centers,          3*(size_t)N*sizeof(double),           cudaMemcpyHostToDevice));
         CU_TRY(cudaMemcpy(d_face_offsets, polyData->face_offsets,     ((size_t)N+1)*sizeof(int),            cudaMemcpyHostToDevice));
         CU_TRY(cudaMemcpy(d_edge_offsets, polyData->edge_offsets,     ((size_t)nFaces+1)*sizeof(int),       cudaMemcpyHostToDevice));
-        CU_TRY(cudaMemcpy(d_face_cz,      polyData->face_cz,          (size_t)nFaces*sizeof(double),        cudaMemcpyHostToDevice));
-        CU_TRY(cudaMemcpy(d_face_rot,     polyData->face_rot,         9*(size_t)nFaces*sizeof(double),      cudaMemcpyHostToDevice));
-        CU_TRY(cudaMemcpy(d_face_orig,    polyData->face_orig,        3*(size_t)nFaces*sizeof(double),      cudaMemcpyHostToDevice));
-        CU_TRY(cudaMemcpy(d_edge_pts,     polyData->edge_pts_2d,      2*(size_t)nEdges*sizeof(double),      cudaMemcpyHostToDevice));
+        if(nFaces > 0) {
+            CU_TRY(cudaMemcpy(d_face_cz,      polyData->face_cz,      (size_t)nFaces*sizeof(double),        cudaMemcpyHostToDevice));
+            CU_TRY(cudaMemcpy(d_face_rot,     polyData->face_rot,     9*(size_t)nFaces*sizeof(double),      cudaMemcpyHostToDevice));
+            CU_TRY(cudaMemcpy(d_face_orig,    polyData->face_orig,    3*(size_t)nFaces*sizeof(double),      cudaMemcpyHostToDevice));
+        }
+        if(nEdges > 0) {
+            CU_TRY(cudaMemcpy(d_edge_pts,     polyData->edge_pts_2d,  2*(size_t)nEdges*sizeof(double),      cudaMemcpyHostToDevice));
+        }
+        CU_TRY(cudaMemcpy(d_is_rec,       recData->is_rec,            (size_t)N*sizeof(int),                cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_rec_centers,  recData->centers,           3*(size_t)N*sizeof(double),           cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_rec_dims,     recData->dims,              3*(size_t)N*sizeof(double),           cudaMemcpyHostToDevice));
         CU_TRY(cudaMemcpy(d_sym_counts,   symData->sym_counts,        (size_t)N*sizeof(int),                cudaMemcpyHostToDevice));
         CU_TRY(cudaMemcpy(d_sym_offsets,  symData->sym_offsets,       ((size_t)N+1)*sizeof(int),            cudaMemcpyHostToDevice));
         CU_TRY(cudaMemcpy(d_sym_pt,       symData->point_transforms,  (size_t)totalCopies*9*sizeof(double), cudaMemcpyHostToDevice));
         CU_TRY(cudaMemcpy(d_sym_ft,       symData->field_transforms,  (size_t)totalCopies*9*sizeof(double), cudaMemcpyHostToDevice));
 
-        assemble_poly_kernel<<<(unsigned int)gridSize, blockSize>>>(
+        assemble_mixed_kernel<<<(unsigned int)gridSize, blockSize>>>(
             N, d_obs, d_centers,
             d_face_offsets, d_edge_offsets,
             d_face_cz, d_face_rot, d_face_orig, d_edge_pts,
+            d_is_rec, d_rec_centers, d_rec_dims,
+            recData->abs_rand, recData->rel_rand, recData->zero_rand,
+            recData->act_on_doubles,
             d_sym_counts, d_sym_offsets, d_sym_pt, d_sym_ft,
             d_out);
 
@@ -551,21 +737,13 @@ int radGPU_AssembleMatrix(
         cudaFree(d_face_offsets); cudaFree(d_edge_offsets);
         cudaFree(d_face_cz); cudaFree(d_face_rot); cudaFree(d_face_orig);
         cudaFree(d_edge_pts); cudaFree(d_sym_pt); cudaFree(d_sym_ft);
+        cudaFree(d_is_rec); cudaFree(d_rec_centers); cudaFree(d_rec_dims);
         cudaFree(d_out);
         cudaFree(d_sym_counts); cudaFree(d_sym_offsets);
         if(rc != 0 && result->matrix_blocks) {
             delete[] result->matrix_blocks;
             result->matrix_blocks = nullptr;
         }
-    }
-    else
-    {
-        // RecMag GPU assembly not implemented (assemble_recmag_kernel is an empty stub).
-        // Return -1 so the caller (radTInteraction::SetupInteractMatrix) warns the user
-        // via Send.WarningMessage and falls back to CPU. See issues #8 and #11.
-        delete[] result->matrix_blocks;
-        result->matrix_blocks = nullptr;
-        return -1;
     }
 
     return rc;
@@ -589,9 +767,9 @@ void radGPU_FreeAsmData(
         delete[] polyData->centers;      polyData->centers = nullptr;
     }
     if(recData) {
+        delete[] recData->is_rec;        recData->is_rec = nullptr;
         delete[] recData->centers;       recData->centers = nullptr;
         delete[] recData->dims;          recData->dims = nullptr;
-        delete[] recData->obs_centers;   recData->obs_centers = nullptr;
     }
     if(result) {
         delete[] result->matrix_blocks;  result->matrix_blocks = nullptr;

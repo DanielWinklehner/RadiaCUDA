@@ -12,6 +12,8 @@ Usage:
   mpiexec -n 2 python tests/test_mpi_solve.py         # compares against them
   mpiexec -n 2 python tests/test_mpi_solve.py --large # >=1000-element model
                                                       # (packeted-branch check)
+  ... --mixed [--reference]                           # RecMag+polyhedron model
+                                                      # (mixed GPU-asm kernel)
 
 Import order matters: radia BEFORE mpi4py, then rad.UtiMPI('in').
 """
@@ -28,11 +30,11 @@ import numpy as np
 REF_FILE = os.path.join(os.path.dirname(__file__), "_mpi_solve_reference.json")
 
 
-def build_model(large=False):
+def build_model(kind="small"):
     rad.UtiDelAll()
     rng = np.random.default_rng(11)
 
-    if large:
+    if kind == "large":
         # >= 1000 relaxable elements (RecMags: cheap analytic B_comp) to hit
         # the packeted MPI-assembly branch at nProc=2.
         n = 1100
@@ -49,6 +51,15 @@ def build_model(large=False):
             base = rng.uniform([20, 5, 5], [90, 40, 40])
             verts = base + rng.uniform(2, 10, size=(4, 3))
             ids.append(rad.ObjPolyhdr(verts.tolist(), faces))
+        if kind == "mixed":
+            # RecMag + polyhedron in one relaxable set: exercises the mixed
+            # GPU-assembly kernel (RecMag Q-tensor + cross blocks) under MPI.
+            for i in range(3):
+                for j in range(2):
+                    for k in range(2):
+                        ids.append(rad.ObjRecMag(
+                            [30.0 + i * 12, 10.0 + j * 11, 8.0 + k * 9],
+                            [10.0, 8.0, 7.0]))
         iron = rad.ObjCnt(ids)
         rad.TrfZerPerp(iron, [0, 0, 0], [1, 0, 0])
         rad.TrfZerPara(iron, [0, 0, 0], [0, 0, 1])
@@ -70,13 +81,14 @@ def solve(model, *, gpu_asm, gpu_relax):
 
 def main():
     rank = comm.Get_rank()
-    large = "--large" in sys.argv
+    kind = ("large" if "--large" in sys.argv else
+            "mixed" if "--mixed" in sys.argv else "small")
     write_ref = "--reference" in sys.argv
 
     if comm.Get_size() > 1:
         rad.UtiMPI('in')
 
-    combos = ([("cpu_asm_cpu_relax", False, False)] if large else
+    combos = ([("cpu_asm_cpu_relax", False, False)] if kind == "large" else
               [("gpu_asm_gpu_relax", True, True),
                ("gpu_asm_cpu_relax", True, False),
                ("cpu_asm_cpu_relax", False, False),
@@ -84,7 +96,7 @@ def main():
 
     results = {}
     for name, gpu_asm, gpu_relax in combos:
-        model = build_model(large=large)
+        model = build_model(kind)
         out = solve(model, gpu_asm=gpu_asm, gpu_relax=gpu_relax)
         if rank == 0:
             results[name] = out
@@ -92,7 +104,7 @@ def main():
                   f"bz(p0)={out['b'][0][2]:.8f}", flush=True)
 
     if rank == 0:
-        key = "large" if large else "small"
+        key = kind
         if write_ref:
             ref = {}
             if os.path.exists(REF_FILE):
