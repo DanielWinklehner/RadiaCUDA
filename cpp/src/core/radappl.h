@@ -50,6 +50,7 @@ class radTApplication {
 
 #ifdef RADIA_WITH_CUDA
     friend int radGPU_ComputeField(int indObj, double* arCoord, int nP, double* arB, int use_gpu);
+    friend int radGPU_ComputeFieldFromSrcRep(void* srcRepPtr, double* arCoord, int nP, double* arB, int use_gpu);
 #endif
 
 public:
