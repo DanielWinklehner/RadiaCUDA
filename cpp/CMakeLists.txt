@@ -105,7 +105,11 @@ if(RADIA_WITH_CUDA)
         ${RAD_CORE_DIR}/radgpu_fld.cu
     )
     set_target_properties(radia_cuda PROPERTIES
-        CUDA_ARCHITECTURES "70;75;80;86;89;90"
+        # Cover every GPU type on the SubMIT cluster (and common desktops):
+        # 60/61 Pascal (GTX 1080/1080Ti), 70 Volta (V100), 75 Turing (RTX6000),
+        # 80 Ampere (A30), 86/89/90 newer. Omitting Pascal made kernels fail to
+        # launch on a 1080Ti with "named symbol not found" (no sm_61 image).
+        CUDA_ARCHITECTURES "60;61;70;75;80;86;89;90"
         CUDA_SEPARABLE_COMPILATION ON
         # Perform the nvcc -dlink step while building this static lib so the
         # archive is self-contained. Without this, the device-link object that
