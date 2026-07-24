@@ -107,6 +107,12 @@ if(RADIA_WITH_CUDA)
     set_target_properties(radia_cuda PROPERTIES
         CUDA_ARCHITECTURES "70;75;80;86;89;90"
         CUDA_SEPARABLE_COMPILATION ON
+        # Perform the nvcc -dlink step while building this static lib so the
+        # archive is self-contained. Without this, the device-link object that
+        # defines __cudaRegisterLinkedBinary_* is never generated when the lib
+        # is consumed transitively by the CXX-linked `radia` module, and the
+        # import fails with "undefined symbol: __cudaRegisterLinkedBinary_*".
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
         POSITION_INDEPENDENT_CODE ON
     )
     target_include_directories(radia_cuda PRIVATE
