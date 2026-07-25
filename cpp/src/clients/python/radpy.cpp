@@ -2912,6 +2912,43 @@ static PyObject* radia_FldUnits(PyObject* self, PyObject* args)
 }
 
 /************************************************************************//**
+ * Utility Methods: gets/sets the GPU fallback policy -- what happens when the GPU
+ * cannot service the interaction matrix (typically: it does not fit in VRAM).
+ * Called with no argument it only reports the policy in effect.
+ ***************************************************************************/
+static const char* g_sGpuFallbackNames[] = {"cpu", "gpu_streaming", "break"};
+
+static PyObject* radia_UtiGpuFallback(PyObject* self, PyObject* args)
+{
+	PyObject *oMode=0, *oRes=0;
+	try
+	{
+		if(!PyArg_ParseTuple(args, "|O:UtiGpuFallback", &oMode)) throw CombErStr(strEr_BadFuncArg, ": UtiGpuFallback");
+
+		int newMode = -1; //query only
+		if((oMode != 0) && (oMode != Py_None))
+		{
+			char sMode[256]; *sMode = '\0';
+			CPyParse::CopyPyStringToC(oMode, sMode, 255);
+			newMode = -1;
+			for(int i=0; i<3; i++) { if(strcmp(sMode, g_sGpuFallbackNames[i]) == 0) { newMode = i; break;} }
+			if(newMode < 0) throw "UtiGpuFallback: expected 'cpu', 'gpu_streaming' or 'break'";
+		}
+
+		int mode = 0;
+		g_pyParse.ProcRes(RadUtiGpuFallback(&mode, newMode));
+
+		if((mode < 0) || (mode > 2)) mode = 0;
+		oRes = Py_BuildValue("s", g_sGpuFallbackNames[mode]);
+	}
+	catch(const char* erText)
+	{
+		PyErr_SetString(PyExc_RuntimeError, erText);
+	}
+	return oRes;
+}
+
+/************************************************************************//**
  * Magnetic Field Calculation Methods: Switches on or off the randomization of all the length values. The randomization magnitude can be set by the function radFldLenTol.
  ***************************************************************************/
 static PyObject* radia_FldLenRndSw(PyObject* self, PyObject* args)
@@ -3390,6 +3427,7 @@ static PyMethodDef radia_methods[] = {
 	{"UtiVer", radia_UtiVer, METH_VARARGS, "UtiVer() returns version number of the Radia library."},
 	{"UtiFldLastBackend", radia_UtiFldLastBackend, METH_VARARGS, "UtiFldLastBackend() returns which backend serviced the most recent Fld B-field evaluation: 'gpu', 'cpu', or 'none' (if no B-field Fld call has occurred yet). Diagnostic for the GPU path and its CPU fallback."},
 	{"UtiAsmLastBackend", radia_UtiAsmLastBackend, METH_VARARGS, "UtiAsmLastBackend() returns which backend serviced the most recent RlxPre interaction-matrix assembly: 'gpu', 'cpu', or 'none' (if no assembly has occurred yet). Diagnostic for the GPU assembly path and its CPU fallback."},
+	{"UtiGpuFallback", radia_UtiGpuFallback, METH_VARARGS, "UtiGpuFallback(mode) sets what happens when the GPU cannot service the interaction matrix (typically: the dense matrix does not fit in VRAM), and returns the policy in effect. Called with no argument it only reports it. 'cpu' (default) falls back to the CPU assembly, which is correct but can be orders of magnitude slower; 'break' raises an error instead, so a model that no longer fits is caught immediately rather than silently turning a short solve into a long one; 'gpu_streaming' keeps the matrix in host RAM and moves it to the device one row block per matvec, which lifts the VRAM limit on model size at the cost of PCIe traffic on every iteration (results are bit-identical to an in-core solve). Nothing changes this by itself."},
 	{"UtiMPI", radia_UtiMPI, METH_VARARGS, "UtiMPI('on|in|off|share|barrier',data,rankFrom,rankTo) controls the Message Passing Interface (MPI) for parallel calculations and returns a list of basic MPI process parameters (rank of the process and total number of processes). With 'on' Radia initializes MPI itself (calls MPI_Init); use 'in' instead when MPI has already been initialized externally (e.g. by mpi4py), in which case Radia only queries the rank and size and does not call MPI_Init. 'off' finalizes MPI (calls MPI_Finalize). With 'share' the function sends data (list or array) from rankFrom (0 by default) to all processes (when rankTo is -1, the default) or to a specific rankTo. With 'barrier' all processes synchronize at an MPI barrier."},
 
 	{NULL, NULL}

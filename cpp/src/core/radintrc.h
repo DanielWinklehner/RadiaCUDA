@@ -152,6 +152,14 @@ public:
 	// Which backend serviced the most recent interaction-matrix assembly:
 	// -1 = none yet, 0 = CPU, 1 = GPU. Diagnostic (rad.UtiAsmLastBackend()).
 	static char gLastAsmBackend;
+	// RadiaCUDA: what to do when the GPU cannot service the interaction matrix
+	// (typically: the dense matrix does not fit in VRAM). Set globally via
+	// rad.UtiGpuFallback(...). NOTHING ever changes this by itself -- a run
+	// only leaves the GPU if the user said it may.
+	//   0 = 'cpu'            fall back to the CPU assembly (default; legacy)
+	//   1 = 'gpu_streaming'  keep the matrix in host RAM and stream it
+	//   2 = 'break'          raise an error instead of silently going slow
+	static char gGpuFallback;
 
 	radTInteraction(const radThg&, const radThg&, const radTCompCriterium&, short =0, char =0, char =0, int =-1, int =0); //OC08012020
 	//radTInteraction(const radThg&, const radThg&, const radTCompCriterium&, short =0, char =0, char =0);

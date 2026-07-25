@@ -16,6 +16,22 @@
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>      // memcpy into the pinned staging tiles
+
+// GPU fallback policy (radintrc.cpp): 0 = 'cpu', 1 = 'gpu_streaming', 2 = 'break'.
+// Declared rather than included -- radintrc.h drags in the whole core header
+// chain, which does not survive nvcc.
+extern "C" int RadGetGpuFallbackMode();
+
+// Validation hook: take the streaming path even for a matrix that WOULD fit,
+// so the streamed result can be diffed against the in-core one on a model
+// small enough to solve both ways. Only ever consulted when the caller already
+// chose 'gpu_streaming'; it cannot pull a run off the in-core path by itself.
+static int radGPU_ForceStream()
+{
+    const char* e = getenv("RADGPU_FORCE_STREAM");
+    return (e && *e && *e != '0')? 1 : 0;
+}
 
 // ============================================================
 // Device helpers
@@ -204,6 +220,134 @@ __global__ void matvec_add_extfield_kernel(
         sum += __shfl_down_sync(0xffffffffu, sum, off);
     }
     if(lane == 0) field[row] = sum + extField[row];
+}
+
+// ---------------------------------------------------------------------------
+// Out-of-core matvec (UtiGpuFallback('gpu_streaming'))
+//
+// Same kernel body as matvec_add_extfield_kernel, over a ROW BLOCK of the
+// matrix instead of all of it: lane k of the row's warp still walks columns
+// k, k+32, ... and reduces by shuffle, so a given row accumulates in exactly
+// the same order and the streamed result is BIT-IDENTICAL to the resident one.
+// Only `field`/`extField` are offset by the caller; `magn` is the full vector.
+// ---------------------------------------------------------------------------
+__global__ void matvec_tile_add_extfield_kernel(
+    const float* __restrict__ tile,        // [nRows * N3] row block
+    const double* __restrict__ magn,       // [N3] full vector
+    const double* __restrict__ extField,   // [nRows] (caller offset it)
+    double* __restrict__ field,            // [nRows] (caller offset it)
+    int nRows,
+    int N3)
+{
+    int warpsPerBlock = blockDim.x >> 5;
+    int row = blockIdx.x * warpsPerBlock + (threadIdx.x >> 5);
+    int lane = threadIdx.x & 31;
+    if(row >= nRows) return;
+
+    const float* matRow = tile + (long long)row * N3;
+    double sum = 0.0;
+    for(int j = lane; j < N3; j += 32) {
+        sum += (double)matRow[j] * magn[j];
+    }
+    for(int off = 16; off > 0; off >>= 1) {
+        sum += __shfl_down_sync(0xffffffffu, sum, off);
+    }
+    if(lane == 0) field[row] = sum + extField[row];
+}
+
+// Streaming state. Only ever armed by an explicit UtiGpuFallback('gpu_streaming')
+// after the matrix has been found not to fit; `active == 0` is the resident path.
+struct RadGPU_MatStreamCtx {
+    const float* h_matrix;      // full row-major matrix, host-resident (not owned)
+    float* h_pin[2];            // pinned staging tiles
+    float* d_tile[2];           // device tiles
+    cudaStream_t stream[2];
+    int rowsPerTile;
+    int active;
+};
+static RadGPU_MatStreamCtx g_matStream = {nullptr, {nullptr, nullptr},
+                                          {nullptr, nullptr}, {0, 0}, 0, 0};
+
+static void radGPU_MatStreamRelease()
+{
+    for(int b = 0; b < 2; b++) {
+        if(g_matStream.d_tile[b]) { cudaFree(g_matStream.d_tile[b]); g_matStream.d_tile[b] = nullptr; }
+        if(g_matStream.h_pin[b])  { cudaFreeHost(g_matStream.h_pin[b]); g_matStream.h_pin[b] = nullptr; }
+        if(g_matStream.stream[b]) { cudaStreamDestroy(g_matStream.stream[b]); g_matStream.stream[b] = nullptr; }
+    }
+    g_matStream.h_matrix = nullptr;
+    g_matStream.rowsPerTile = 0;
+    g_matStream.active = 0;
+}
+
+// Arm streaming for a matrix that stays in host RAM. Returns 0 on success.
+// `reserveB` is the device memory the caller still needs for its O(N) work
+// arrays, which the tiles must not eat into.
+static int radGPU_MatStreamArm(const float* h_matrix, int N3, size_t reserveB)
+{
+    radGPU_MatStreamRelease();
+    if(!h_matrix || N3 <= 0) return -1;
+
+    size_t rowBytes = (size_t)N3 * sizeof(float);
+    size_t freeB = 0, totalB = 0;
+    if(cudaMemGetInfo(&freeB, &totalB) != cudaSuccess) return -1;
+    size_t budget = (freeB > reserveB)? (size_t)((double)(freeB - reserveB) * 0.70) : 0;
+    size_t rows = (rowBytes > 0)? (budget / (2 * rowBytes)) : 0;   // two tiles
+    if(rows < 1) {
+        fprintf(stderr, "radGPU: streaming matvec cannot fit even one row "
+                        "(N3=%d); not enough free GPU memory.\n", N3);
+        return -1;
+    }
+    if(rows > (size_t)N3) rows = (size_t)N3;
+
+    g_matStream.rowsPerTile = (int)rows;
+    size_t tileB = rows * rowBytes;
+    for(int b = 0; b < 2; b++) {
+        if(cudaMalloc(&g_matStream.d_tile[b], tileB) != cudaSuccess) { radGPU_MatStreamRelease(); return -1; }
+        // Pinned staging keeps the H2D copies asynchronous (a pageable source
+        // would serialize them and defeat the double buffering).
+        if(cudaHostAlloc(&g_matStream.h_pin[b], tileB, cudaHostAllocDefault) != cudaSuccess) { radGPU_MatStreamRelease(); return -1; }
+        if(cudaStreamCreate(&g_matStream.stream[b]) != cudaSuccess) { radGPU_MatStreamRelease(); return -1; }
+    }
+    g_matStream.h_matrix = h_matrix;
+    g_matStream.active = 1;
+
+    double perMatvecGB = (double)N3 * N3 * sizeof(float) / 1e9;
+    fprintf(stderr,
+        "radGPU: streaming interaction matrix from host RAM "
+        "(%.1f GB per matvec, %d rows/tile x 2 buffers = %.2f GB on device). "
+        "Every iteration now moves the whole matrix over PCIe -- expect it to "
+        "be MUCH slower than an in-core solve.\n",
+        perMatvecGB, g_matStream.rowsPerTile, 2.0 * tileB / 1e9);
+    return 0;
+}
+
+// Dense matvec + external field, resident or streamed. Drop-in for the
+// matvec_add_extfield_kernel launches below.
+static void radGPU_Matvec(const float* d_matrix,
+                          const double* d_x, const double* d_ext,
+                          double* d_out, int N3, int blkMV, int tpb)
+{
+    if(!g_matStream.active) {
+        matvec_add_extfield_kernel<<<blkMV, tpb>>>(d_matrix, d_x, d_ext, d_out, N3);
+        return;
+    }
+    const int R = g_matStream.rowsPerTile;
+    const int warpsPerBlock = tpb >> 5;
+    for(int r0 = 0, b = 0; r0 < N3; r0 += R, b ^= 1) {
+        int nRows = (N3 - r0 < R)? (N3 - r0) : R;
+        size_t bytes = (size_t)nRows * N3 * sizeof(float);
+        // Wait for the previous use of THIS buffer before refilling it.
+        cudaStreamSynchronize(g_matStream.stream[b]);
+        memcpy(g_matStream.h_pin[b], g_matStream.h_matrix + (long long)r0 * N3, bytes);
+        cudaMemcpyAsync(g_matStream.d_tile[b], g_matStream.h_pin[b], bytes,
+                        cudaMemcpyHostToDevice, g_matStream.stream[b]);
+        int blocks = (nRows + warpsPerBlock - 1) / warpsPerBlock;
+        matvec_tile_add_extfield_kernel<<<blocks, tpb, 0, g_matStream.stream[b]>>>(
+            g_matStream.d_tile[b], d_x, d_ext + r0, d_out + r0, nRows, N3);
+    }
+    cudaStreamSynchronize(g_matStream.stream[0]);
+    cudaStreamSynchronize(g_matStream.stream[1]);
 }
 
 // Fixed-point residual: F = M_proposed - M (the UNDAMPED proposal step --
@@ -578,6 +722,7 @@ int radGPU_RelaxAuto(
     }
 
     float *d_matrix = nullptr;
+    int streaming = 0;   // matrix streamed from host RAM (UtiGpuFallback)
     double *d_magn = nullptr, *d_magn_new = nullptr;
     double *d_field_full = nullptr, *d_field_out = nullptr;
     double *d_extField = nullptr, *d_residual = nullptr;
@@ -603,8 +748,9 @@ int radGPU_RelaxAuto(
         } \
     } while(0)
 
-    // --- interaction matrix: resident cache ---
+    // --- interaction matrix: resident cache, or streamed from host RAM ---
     if(radGPU_MatrixCached(data->matrixStamp, N3)) {
+        radGPU_MatStreamRelease();   // a resident device matrix supersedes streaming
         d_matrix = g_d_matCache;
     } else {
         if(g_d_matCache) {
@@ -619,27 +765,38 @@ int radGPU_RelaxAuto(
          // raw CUDA malloc failure when the dense matrix cannot fit.
             size_t freeB = 0, totalB = 0;
             cudaMemGetInfo(&freeB, &totalB);
-            size_t needB = matSize * sizeof(float)
-                           + (size_t)N3 * 24 * sizeof(double);  // work arrays
-            if(needB > freeB) {
-                double maxElem = (freeB > 0)
-                    ? (sqrt((double)freeB / sizeof(float)) / 3.0) : 0.0;
-                fprintf(stderr,
-                    "radGPU_RelaxAuto: dense interaction matrix needs %.1f GB "
-                    "but only %.1f of %.1f GB GPU memory is free (~%.0fk "
-                    "elements max on this GPU). Falling back to the CPU "
-                    "relaxation (method 10, OpenMP-parallel) -- expect "
-                    "minutes-per-1000-iterations at this size; consider a "
-                    "coarser mesh or structured elements.\n",
-                    needB / 1e9, freeB / 1e9, totalB / 1e9, maxElem / 1e3);
-                goto cleanup;  // returns -1 -> dispatch falls back to method 10
+            size_t workB = (size_t)N3 * 24 * sizeof(double);   // work arrays
+            size_t needB = matSize * sizeof(float) + workB;
+            int forceStream = (RadGetGpuFallbackMode() == 1) && radGPU_ForceStream();
+            if(needB > freeB || forceStream) {
+                if(RadGetGpuFallbackMode() == 1) {
+                    // 'gpu_streaming': keep the matrix in host RAM and move it
+                    // over PCIe one row block per matvec.
+                    if(radGPU_MatStreamArm(data->h_matrix, N3, workB) != 0) goto cleanup;
+                    streaming = 1;
+                }
+                else {
+                    double maxElem = (freeB > 0)
+                        ? (sqrt((double)freeB / sizeof(float)) / 3.0) : 0.0;
+                    fprintf(stderr,
+                        "radGPU_RelaxAuto: dense interaction matrix needs %.1f GB "
+                        "but only %.1f of %.1f GB GPU memory is free (~%.0fk "
+                        "elements max on this GPU). Falling back to the CPU "
+                        "relaxation (method 10, OpenMP-parallel) -- expect "
+                        "minutes-per-1000-iterations at this size; consider a "
+                        "coarser mesh or structured elements.\n",
+                        needB / 1e9, freeB / 1e9, totalB / 1e9, maxElem / 1e3);
+                    goto cleanup;  // returns -1 -> dispatch falls back to method 10
+                }
             }
         }
-        CUDA_CHK(cudaMalloc(&d_matrix, matSize * sizeof(float)));
-        CUDA_CHK(cudaMemcpy(d_matrix, data->h_matrix, matSize * sizeof(float), cudaMemcpyHostToDevice));
-        g_d_matCache = d_matrix;
-        g_matCacheStamp = data->matrixStamp;
-        g_matCacheDim = N3;
+        if(!streaming) {
+            CUDA_CHK(cudaMalloc(&d_matrix, matSize * sizeof(float)));
+            CUDA_CHK(cudaMemcpy(d_matrix, data->h_matrix, matSize * sizeof(float), cudaMemcpyHostToDevice));
+            g_d_matCache = d_matrix;
+            g_matCacheStamp = data->matrixStamp;
+            g_matCacheDim = N3;
+        }
     }
 
     CUDA_CHK(cudaMalloc(&d_magn, N3 * sizeof(double)));
@@ -695,8 +852,8 @@ int radGPU_RelaxAuto(
 
         // Initialize the per-element H (inner-solve linearization start)
         // ON THE GPU: H = A*M + H_ext (was an O(N^2) CPU loop in Pack).
-        matvec_add_extfield_kernel<<<blkMV, tpb>>>(
-            d_matrix, d_magn, d_extField, d_field_out, N3);
+        radGPU_Matvec(
+            d_matrix, d_magn, d_extField, d_field_out, N3, blkMV, tpb);
 
         double omega = (data->omega > 0.0) ? data->omega : 0.3;
         double omegaCeiling = 1.0;       // upper bound, ratchets down
@@ -737,8 +894,8 @@ int radGPU_RelaxAuto(
         for(int iter = 0; iter < maxIter; iter++) {
 
             // Step 1: H_full = A * M + H_ext (full matrix, including diagonal)
-            matvec_add_extfield_kernel<<<blkMV, tpb>>>(
-                d_matrix, d_magn, d_extField, d_field_full, N3);
+            radGPU_Matvec(
+                d_matrix, d_magn, d_extField, d_field_full, N3, blkMV, tpb);
 
             // Step 2: implicit per-element solve → M_proposed
             implicit_solve_kernel<<<blkEl, tpb>>>(
@@ -1038,6 +1195,9 @@ cleanup:
     // The interaction matrix is OWNED BY THE RESIDENT CACHE (freed on
     // replacement); free it here only if it never made it into the cache.
     if(d_matrix && d_matrix != g_d_matCache) cudaFree(d_matrix);
+    // Streaming tiles alias data->h_matrix, which the caller frees after
+    // this returns -- never leave the context pointing at freed memory.
+    radGPU_MatStreamRelease();
     if(d_magn) cudaFree(d_magn);
     if(d_magn_new) cudaFree(d_magn_new);
     if(d_field_full) cudaFree(d_field_full);
@@ -1411,6 +1571,7 @@ int radGPU_RelaxNK(
     double smoothOmega = (data->omega > 0.0) ? data->omega : 0.3;
 
     float *d_matrix = nullptr;
+    int streaming = 0;   // matrix streamed from host RAM (UtiGpuFallback)
     double *d_magn = nullptr, *d_xtrial = nullptr, *d_delta = nullptr;
     double *d_magn_new = nullptr, *d_field_out = nullptr;
     double *d_hfull = nullptr, *d_qt = nullptr, *d_t = nullptr;
@@ -1446,8 +1607,9 @@ int radGPU_RelaxNK(
         } \
     } while(0)
 
-    // --- interaction matrix: same resident cache as method 9 ---
+    // --- interaction matrix: same resident cache as method 9, or streamed ---
     if(radGPU_MatrixCached(data->matrixStamp, N3)) {
+        radGPU_MatStreamRelease();   // a resident device matrix supersedes streaming
         d_matrix = g_d_matCache;
     } else {
         if(g_d_matCache) {
@@ -1458,11 +1620,35 @@ int radGPU_RelaxNK(
             fprintf(stderr, "radGPU_RelaxNK: matrix neither packed nor cached\n");
             goto cleanup;
         }
-        CUDA_CHK(cudaMalloc(&d_matrix, matSize * sizeof(float)));
-        CUDA_CHK(cudaMemcpy(d_matrix, data->h_matrix, matSize * sizeof(float), cudaMemcpyHostToDevice));
-        g_d_matCache = d_matrix;
-        g_matCacheStamp = data->matrixStamp;
-        g_matCacheDim = N3;
+        {// Same pre-flight as method 9: under 'gpu_streaming' the matrix stays
+         // in host RAM, otherwise a matrix that cannot fit returns -1 and the
+         // caller applies its fallback policy.
+            size_t freeB = 0, totalB = 0;
+            cudaMemGetInfo(&freeB, &totalB);
+            size_t workB = (size_t)N3 * 24 * sizeof(double);   // Krylov + work arrays
+            int forceStream = (RadGetGpuFallbackMode() == 1) && radGPU_ForceStream();
+            if(matSize * sizeof(float) + workB > freeB || forceStream) {
+                if(RadGetGpuFallbackMode() == 1) {
+                    if(radGPU_MatStreamArm(data->h_matrix, N3, workB) != 0) goto cleanup;
+                    streaming = 1;
+                }
+                else {
+                    fprintf(stderr,
+                        "radGPU_RelaxNK: dense interaction matrix needs %.1f GB "
+                        "but only %.1f of %.1f GB GPU memory is free.\n",
+                        (matSize * sizeof(float) + workB) / 1e9,
+                        freeB / 1e9, totalB / 1e9);
+                    goto cleanup;
+                }
+            }
+        }
+        if(!streaming) {
+            CUDA_CHK(cudaMalloc(&d_matrix, matSize * sizeof(float)));
+            CUDA_CHK(cudaMemcpy(d_matrix, data->h_matrix, matSize * sizeof(float), cudaMemcpyHostToDevice));
+            g_d_matCache = d_matrix;
+            g_matCacheStamp = data->matrixStamp;
+            g_matCacheDim = N3;
+        }
     }
 
     CUDA_CHK(cudaMalloc(&d_magn, N3 * sizeof(double)));
@@ -1531,12 +1717,12 @@ int radGPU_RelaxNK(
         // ---- pre-smoothing: a few damped Jacobi passes (also initializes
         // the persistent per-element H for the implicit-solve kernel) ----
         if(nPresmooth > 0) {
-            matvec_add_extfield_kernel<<<blkMV, tpb>>>(
-                d_matrix, d_magn, d_extField, d_field_out, N3);
+            radGPU_Matvec(
+                d_matrix, d_magn, d_extField, d_field_out, N3, blkMV, tpb);
             matvecs++;
             for(int s = 0; s < nPresmooth && matvecs < maxIter; s++) {
-                matvec_add_extfield_kernel<<<blkMV, tpb>>>(
-                    d_matrix, d_magn, d_extField, d_hfull, N3);
+                radGPU_Matvec(
+                    d_matrix, d_magn, d_extField, d_hfull, N3, blkMV, tpb);
                 implicit_solve_kernel<<<blkEl, tpb>>>(
                     d_hfull, d_magn, d_magn_new, d_field_out,
                     d_selfBlocks, d_matType, d_linKsi, d_remMagn,
@@ -1577,8 +1763,8 @@ int radGPU_RelaxNK(
         // direction even when the exact step is fine.
         double etaCap = 0.1;
         #define NK_EVAL_FDP(XPTR, SHIFT) do { \
-            matvec_add_extfield_kernel<<<blkMV, tpb>>>( \
-                d_matrix, (XPTR), d_extField, d_hfull, N3); \
+            radGPU_Matvec( \
+                d_matrix, (XPTR), d_extField, d_hfull, N3, blkMV, tpb); \
             nk_material_kernel<<<blkEl, tpb>>>( \
                 d_hfull, (XPTR), d_F, d_resid, d_D, d_Pinv, (SHIFT), \
                 d_selfBlocks, d_matType, d_linKsi, d_remMagn, \
@@ -1613,8 +1799,8 @@ int radGPU_RelaxNK(
             CUDA_CHK(cudaMemcpy(d_t, hv, N3 * sizeof(double), cudaMemcpyHostToDevice));
             // analytic J*v = D*(Q*v) - v  -> store -(A v) = J v in d_delta
             // (shift = 1: the pure Newton operator is the physical Jacobian)
-            matvec_add_extfield_kernel<<<blkMV, tpb>>>(
-                d_matrix, d_t, d_zeroExt, d_qt, N3);
+            radGPU_Matvec(
+                d_matrix, d_t, d_zeroExt, d_qt, N3, blkMV, tpb);
             nk_apply_A_kernel<<<blkEl, tpb>>>(d_t, d_qt, d_D, 1.0, d_delta, N);
             nk_scale_kernel<<<blkV, tpb>>>(d_delta, -1.0, N3);
             // save F(X)
@@ -1677,8 +1863,8 @@ int radGPU_RelaxNK(
                     CUDA_CHK(cudaMemcpy(Vcol0, d_F, N3 * sizeof(double), cudaMemcpyDeviceToDevice));
                 } else {
                     // r = F - A*delta
-                    matvec_add_extfield_kernel<<<blkMV, tpb>>>(
-                        d_matrix, d_delta, d_zeroExt, d_qt, N3);
+                    radGPU_Matvec(
+                        d_matrix, d_delta, d_zeroExt, d_qt, N3, blkMV, tpb);
                     matvecs++;
                     nk_apply_A_kernel<<<blkEl, tpb>>>(d_delta, d_qt, d_D, shiftCur, Vcol0, N);
                     vec_diff_kernel<<<blkV, tpb>>>(d_F, Vcol0, Vcol0, N3);
@@ -1707,8 +1893,8 @@ int radGPU_RelaxNK(
                     double* Vj1 = d_V + (size_t)(j+1) * N3;
                     // w = A P^{-1} V_j
                     nk_apply_Pinv_kernel<<<blkEl, tpb>>>(Vj, d_Pinv, d_t, N);
-                    matvec_add_extfield_kernel<<<blkMV, tpb>>>(
-                        d_matrix, d_t, d_zeroExt, d_qt, N3);
+                    radGPU_Matvec(
+                        d_matrix, d_t, d_zeroExt, d_qt, N3, blkMV, tpb);
                     matvecs++;
                     gmIters++;
                     nk_apply_A_kernel<<<blkEl, tpb>>>(d_t, d_qt, d_D, shiftCur, Vj1, N);
@@ -1866,12 +2052,12 @@ int radGPU_RelaxNK(
             shiftCur = 1.0 + 1.0/dtau;
             if(nkFails == 4 && matvecs + nSmoothFallback < maxIter) {
                 double misfitBefore = misfit;
-                matvec_add_extfield_kernel<<<blkMV, tpb>>>(
-                    d_matrix, d_magn, d_extField, d_field_out, N3);
+                radGPU_Matvec(
+                    d_matrix, d_magn, d_extField, d_field_out, N3, blkMV, tpb);
                 matvecs++;
                 for(int s = 0; s < nSmoothFallback && matvecs < maxIter; s++) {
-                    matvec_add_extfield_kernel<<<blkMV, tpb>>>(
-                        d_matrix, d_magn, d_extField, d_hfull, N3);
+                    radGPU_Matvec(
+                        d_matrix, d_magn, d_extField, d_hfull, N3, blkMV, tpb);
                     implicit_solve_kernel<<<blkEl, tpb>>>(
                         d_hfull, d_magn, d_magn_new, d_field_out,
                         d_selfBlocks, d_matType, d_linKsi, d_remMagn,
@@ -1899,8 +2085,8 @@ int radGPU_RelaxNK(
         }
 
         // ---- final state: H at X for the h_field output ----
-        matvec_add_extfield_kernel<<<blkMV, tpb>>>(
-            d_matrix, d_magn, d_extField, d_hfull, N3);
+        radGPU_Matvec(
+            d_matrix, d_magn, d_extField, d_hfull, N3, blkMV, tpb);
         CUDA_CHK(cudaMemcpy(data->h_magn, d_magn, N3 * sizeof(double), cudaMemcpyDeviceToHost));
         CUDA_CHK(cudaMemcpy(data->h_field, d_hfull, N3 * sizeof(double), cudaMemcpyDeviceToHost));
 
@@ -1933,6 +2119,9 @@ cleanup:
     delete[] hy;
     delete[] hcoef;
     if(d_matrix && d_matrix != g_d_matCache) cudaFree(d_matrix);
+    // Streaming tiles alias data->h_matrix, which the caller frees after
+    // this returns -- never leave the context pointing at freed memory.
+    radGPU_MatStreamRelease();
     if(d_magn) cudaFree(d_magn);
     if(d_xtrial) cudaFree(d_xtrial);
     if(d_delta) cudaFree(d_delta);

@@ -84,6 +84,8 @@ void MvsH( int, char*, double,double,double );
 void PreRelax( int, int );
 void RadSetGpuAsmEnabled( int ); //RadiaCUDA: GPU IM-assembly switch (radintrc.cpp)
 int RadGetLastAsmBackend(); //RadiaCUDA: backend of the most recent IM assembly (radintrc.cpp)
+void RadSetGpuFallbackMode( int ); //RadiaCUDA: GPU fallback policy (radintrc.cpp)
+int RadGetGpuFallbackMode(); //RadiaCUDA: current GPU fallback policy (radintrc.cpp)
 void ShowInteractMatrix(int);
 void ShowInteractVector(int, char*);
 void ManualRelax( int, int, int, double );
@@ -924,6 +926,20 @@ int CALL RadRlxPre(int* n, int Obj, int SrcObj, int use_gpu_asm)
 	PreRelax(Obj, SrcObj);
 
 	*n = ioBuffer.OutInt();
+	return ioBuffer.OutErrorStatus();
+}
+
+//-------------------------------------------------------------------------
+
+int CALL RadUtiGpuFallback(int* mode, int newMode)
+{
+	//newMode < 0 queries without changing anything.
+	if(newMode >= 0)
+	{
+		if(newMode > 2) { ioBuffer.StoreErrorMessage("Radia::Error000"); return ioBuffer.OutErrorStatus();}
+		RadSetGpuFallbackMode(newMode);
+	}
+	*mode = RadGetGpuFallbackMode();
 	return ioBuffer.OutErrorStatus();
 }
 

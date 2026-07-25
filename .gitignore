@@ -4,3 +4,4 @@
 /.idea/
 __pycache__/
 /SEGMENTATION_ANALYSIS.md
+/build_dev/

@@ -34,11 +34,14 @@
 
 char radTInteraction::gUseGpuAsm = 1; //RadiaCUDA: GPU IM assembly on by default
 char radTInteraction::gLastAsmBackend = -1; //RadiaCUDA: -1 = no assembly yet, 0 = CPU, 1 = GPU
+char radTInteraction::gGpuFallback = 0; //RadiaCUDA: 0 = 'cpu' (legacy), 1 = 'gpu_streaming', 2 = 'break'
 
 //RadiaCUDA: C-linkage bridge so the entry layer (radentry.cpp) can set the
 //GPU-assembly flag without pulling in this header's include chain.
 extern "C" void RadSetGpuAsmEnabled(int on) { radTInteraction::gUseGpuAsm = on ? 1 : 0; }
 extern "C" int RadGetLastAsmBackend() { return (int)radTInteraction::gLastAsmBackend; }
+extern "C" void RadSetGpuFallbackMode(int mode) { radTInteraction::gGpuFallback = (char)mode; }
+extern "C" int RadGetGpuFallbackMode() { return (int)radTInteraction::gGpuFallback; }
 
 //-------------------------------------------------------------------------
 
@@ -571,6 +574,14 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 		}
 #endif
 		if(gpuAsmOK) { gLastAsmBackend = 1; return 1;}
+
+		//The GPU could not service the matrix. What happens now is the USER's
+		//choice (rad.UtiGpuFallback), never an automatic decision: dropping to
+		//the CPU can turn a seconds-long solve into an hours-long one, so
+		//'break' lets the caller find out immediately and reduce the model
+		//size instead. Tested after the Bcast so every rank agrees.
+		if(gGpuFallback == 2) { Send.ErrorMessage("Radia::Error602"); return 0;}
+
 		//else: fall through to the CPU assembly (serial or MPI-distributed),
 		//consistently on all ranks.
 	}

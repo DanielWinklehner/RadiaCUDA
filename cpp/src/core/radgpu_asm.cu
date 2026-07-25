@@ -20,6 +20,11 @@
 #include <new>          // std::nothrow
 #include <cuda_runtime.h>
 
+// GPU fallback policy (radintrc.cpp): 0 = 'cpu', 1 = 'gpu_streaming', 2 = 'break'.
+// Declared rather than included -- radintrc.h drags in the whole core header chain,
+// which does not survive nvcc.
+extern "C" int RadGetGpuFallbackMode();
+
 // ============================================================
 // Device helper: TransAtans (matches Radia's CPU version)
 // ============================================================
@@ -509,15 +514,20 @@ __global__ void assemble_mixed_kernel(
     const double* __restrict__ sym_point_tr,
     const double* __restrict__ sym_field_tr,
 
-    float* __restrict__ out_blocks              // [N*N*9]
+    int row_begin,                              // first matrix row in this tile
+    int n_rows,                                 // rows in this tile (N = whole matrix)
+    float* __restrict__ out_blocks              // [n_rows*N*9], TILE-local
 )
 {
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    long long total = (long long)N * N;
+    long long total = (long long)n_rows * N;
     if(tid >= total) return;
 
-    int obs_idx = (int)(tid / N);  // row (StrNo)
-    int src_idx = (int)(tid % N);  // column (ColNo)
+    // Row-block tiling: the observation row is offset into the full matrix,
+    // the output index stays tile-local. row_begin=0, n_rows=N reproduces the
+    // whole-matrix launch exactly (same tid -> same (obs,src) -> same slot).
+    int obs_idx = row_begin + (int)(tid / N);  // row (StrNo)
+    int src_idx = (int)(tid % N);              // column (ColNo)
 
     const double PI = 3.14159265358979;
     const double ConstForH = 1.0 / (4.0 * PI);
@@ -688,12 +698,13 @@ int radGPU_AssembleMatrix(
     int N = polyData->n_elem;  // total elements (poly + RecMag; see packing)
 
     long long totalPairs = (long long)N * N;
+    int streamRows = 0;   // set by the pre-flight under UtiGpuFallback('gpu_streaming')
 
     // Pre-flight VRAM check (issue #13): the dense interaction matrix on the device
     // (d_out = totalPairs*9 floats = 36*N^2 bytes) dominates GPU memory. If it won't fit in
-    // free VRAM (with a margin for the smaller geometry/symmetry buffers), skip GPU assembly
-    // up front so the caller (radTInteraction::SetupInteractMatrix) falls back to CPU and
-    // warns -- rather than allocating a 36*N^2 host buffer and then failing a huge cudaMalloc.
+    // free VRAM (with a margin for the smaller geometry/symmetry buffers), the user's
+    // fallback policy decides: 'cpu'/'break' return here (the caller warns or errors),
+    // 'gpu_streaming' switches to row-block assembly, where only ONE TILE has to fit.
     {
         size_t freeB = 0, totalB = 0;
         if(cudaMemGetInfo(&freeB, &totalB) == cudaSuccess)
@@ -701,10 +712,19 @@ int radGPU_AssembleMatrix(
             double needBytes = (double)totalPairs * 9.0 * sizeof(float) * 1.15; // +15% geom/sym
             if(needBytes > (double)freeB * 0.90)
             {
+                // State the fact only. What happens next is the caller's
+                // fallback policy (rad.UtiGpuFallback) -- this function must
+                // not announce "using CPU" when the policy may be 'break'.
                 fprintf(stderr, "GPU assembly: interaction matrix needs ~%.2f GB but only "
-                                "%.2f GB VRAM free (N=%d); using CPU.\n",
+                                "%.2f GB VRAM free (N=%d).\n",
                         needBytes / 1073741824.0, (double)freeB / 1073741824.0, N);
-                return -1;
+                if(RadGetGpuFallbackMode() != 1) return -1;   // 'cpu' or 'break'
+                // 'gpu_streaming': assemble in row blocks instead. The host
+                // buffer is still the full 36*N^2; only the DEVICE side is
+                // tiled, so what has to fit in VRAM is one tile.
+                streamRows = 1;
+                fprintf(stderr, "GPU assembly: streaming enabled "
+                                "(UtiGpuFallback('gpu_streaming')); assembling in row blocks.\n");
             }
         }
     }
@@ -740,7 +760,8 @@ int radGPU_AssembleMatrix(
 
         // Declared before any CU_MALLOC so the goto to `cleanup` never bypasses them.
         int blockSize = 64;
-        long long gridSize = (totalPairs + blockSize - 1) / blockSize;
+        int rowsPerTile = N;          // whole matrix unless streaming
+        long long tilePairs = totalPairs;
 
         // size_t casts keep the byte counts 64-bit (d_out is N*N*9 floats).
         // Face/edge counts can be 0 (pure-RecMag model): pad to 1 element so
@@ -760,7 +781,24 @@ int radGPU_AssembleMatrix(
         CU_MALLOC(d_is_rec,       (size_t)N*sizeof(int));
         CU_MALLOC(d_rec_centers,  3*(size_t)N*sizeof(double));
         CU_MALLOC(d_rec_dims,     3*(size_t)N*sizeof(double));
-        CU_MALLOC(d_out,          totalPairs*9*sizeof(float));
+        // Streaming: d_out holds ONE ROW BLOCK, not the whole matrix. Size the
+        // block from free VRAM after the geometry buffers above are in place,
+        // leaving a 25% margin; clamp to [1, N] rows.
+        if(streamRows) {
+            size_t freeB = 0, totalB = 0;
+            size_t rowBytes = (size_t)N * 9 * sizeof(float);
+            rowsPerTile = 1;
+            if((cudaMemGetInfo(&freeB, &totalB) == cudaSuccess) && (rowBytes > 0)) {
+                size_t budget = (size_t)((double)freeB * 0.75);
+                size_t r = budget / rowBytes;
+                if(r < 1) r = 1;
+                if(r > (size_t)N) r = (size_t)N;
+                rowsPerTile = (int)r;
+            }
+            if(rowsPerTile >= N) { streamRows = 0; rowsPerTile = N; } // it fits after all
+        }
+        tilePairs = (long long)(streamRows ? rowsPerTile : N) * N;
+        CU_MALLOC(d_out,          tilePairs*9*sizeof(float));
         CU_MALLOC(d_sym_counts,   (size_t)N*sizeof(int));
         CU_MALLOC(d_sym_offsets,  ((size_t)N+1)*sizeof(int));
         CU_MALLOC(d_sym_pt,       (size_t)totalCopies*9*sizeof(double));
@@ -786,20 +824,32 @@ int radGPU_AssembleMatrix(
         CU_TRY(cudaMemcpy(d_sym_pt,       symData->point_transforms,  (size_t)totalCopies*9*sizeof(double), cudaMemcpyHostToDevice));
         CU_TRY(cudaMemcpy(d_sym_ft,       symData->field_transforms,  (size_t)totalCopies*9*sizeof(double), cudaMemcpyHostToDevice));
 
-        assemble_mixed_kernel<<<(unsigned int)gridSize, blockSize>>>(
-            N, d_obs, d_centers,
-            d_face_offsets, d_edge_offsets,
-            d_face_cz, d_face_rot, d_face_orig, d_edge_pts,
-            d_is_rec, d_rec_centers, d_rec_dims,
-            recData->abs_rand, recData->rel_rand, recData->zero_rand,
-            recData->act_on_doubles,
-            d_sym_counts, d_sym_offsets, d_sym_pt, d_sym_ft,
-            d_out);
+        // One pass when the matrix fits, otherwise row block by row block into
+        // the same host buffer. Identical arithmetic either way: a given (row,
+        // col) pair maps to the same thread-local work and the same host slot.
+        for(int row0 = 0; row0 < N; row0 += rowsPerTile)
+        {
+            int nRows = (N - row0 < rowsPerTile)? (N - row0) : rowsPerTile;
+            long long pairs = (long long)nRows * N;
+            long long gridSize = (pairs + blockSize - 1) / blockSize;
 
-        CU_TRY(cudaGetLastError());        // launch-configuration errors (grid/block, args)
-        CU_TRY(cudaDeviceSynchronize());   // in-kernel errors (illegal access, TDR timeout, ...)
+            assemble_mixed_kernel<<<(unsigned int)gridSize, blockSize>>>(
+                N, d_obs, d_centers,
+                d_face_offsets, d_edge_offsets,
+                d_face_cz, d_face_rot, d_face_orig, d_edge_pts,
+                d_is_rec, d_rec_centers, d_rec_dims,
+                recData->abs_rand, recData->rel_rand, recData->zero_rand,
+                recData->act_on_doubles,
+                d_sym_counts, d_sym_offsets, d_sym_pt, d_sym_ft,
+                row0, nRows,
+                d_out);
 
-        CU_TRY(cudaMemcpy(result->matrix_blocks, d_out, totalPairs*9*sizeof(float), cudaMemcpyDeviceToHost));
+            CU_TRY(cudaGetLastError());        // launch-configuration errors (grid/block, args)
+            CU_TRY(cudaDeviceSynchronize());   // in-kernel errors (illegal access, TDR timeout, ...)
+
+            CU_TRY(cudaMemcpy(result->matrix_blocks + (long long)row0 * N * 9, d_out,
+                              pairs*9*sizeof(float), cudaMemcpyDeviceToHost));
+        }
 
     cleanup:
         cudaFree(d_obs); cudaFree(d_centers);

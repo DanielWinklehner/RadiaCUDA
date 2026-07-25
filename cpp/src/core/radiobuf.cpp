@@ -20,7 +20,7 @@
 
 //-------------------------------------------------------------------------
 
-int radTIOBuffer::AmOfErrors = 139; //modify this when adding new error !!!
+int radTIOBuffer::AmOfErrors = 140; //modify this when adding new error !!!
 string radTIOBuffer::err_ar[] = {
 
 	"Radia::ErrorXXX::::Wrong Error Number.\0",
@@ -162,6 +162,7 @@ string radTIOBuffer::err_ar[] = {
 	"Radia::Error990::::Graphical presentation of this element is not available.\0",
 	"Radia::Error998::::Execution aborted by User.\0",
 	"Radia::Error999::::Unidentified error.\0",
+	"Radia::Error602::::GPU interaction-matrix assembly could not be completed (e.g. insufficient GPU memory) and the GPU fallback policy is 'break'. Reduce the model size, or set UtiGpuFallback('cpu') to allow the slower CPU assembly.\0",
 	//insert new error here
 };
 

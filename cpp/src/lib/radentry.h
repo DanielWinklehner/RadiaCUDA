@@ -721,6 +721,18 @@ EXP int CALL RadMatSatAniso(int* mat, double* DataPar, int nDataPar, double* Dat
 */
 EXP int CALL RadRlxPre(int* n, int obj, int srcobj, int use_gpu_asm=1);
 
+/** Gets/sets the GPU fallback policy: what happens when the GPU cannot service the
+interaction matrix (typically because the dense matrix does not fit in VRAM). Nothing
+ever changes this by itself -- a run only leaves the GPU if the caller said it may.
+@param mode [out] the policy in effect after the call (0 cpu, 1 gpu_streaming, 2 break)
+@param newMode [in] 0 = 'cpu' (fall back to the CPU assembly; default), 1 = 'gpu_streaming'
+       (keep the matrix in host RAM and stream it to the device), 2 = 'break' (raise an
+       error rather than silently running orders of magnitude slower). A negative value
+       queries the current policy without changing it.
+@return integer error code (0 : no error, >0 : error number, <0 : warning number)
+*/
+EXP int CALL RadUtiGpuFallback(int* mode, int newMode);
+
 /** Executes manual relaxation procedure for the interaction matrix intrc.
 @param D [out] an array of four numbers specifying: [0] average absolute change in magnetization after previous iteration over all the objects participating in the relaxation, [1] maximum absolute value of magnetization over all the objects participating in the relaxation, [2] maximum absolute value of magnetic field strength over central points of all the objects participating in the relaxation, and [3] actual number of iterations done. The values [0]-[2] are those of last iteration.
 @param n [out] length of array D
