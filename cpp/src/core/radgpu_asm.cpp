@@ -254,6 +254,15 @@ void radGPU_UnpackMatrix(
         return;
     }
 
+    // Backstop: never let a non-finite entry reach the solver. The kernel now
+    // guards the degenerate-element math that produced these (radgpu_asm.cu,
+    // radgpu_asm_log_R_plus_u), but a single NaN slipping into InteractMatrix
+    // is silent here and only surfaces much later as an unattributable
+    // "radGPU_RelaxNK: non-finite residual at start" -> CPU fallback. Zero it,
+    // report once with the offending element pair, so the cause is visible.
+    long long nBadEntries = 0;
+    int firstBadI = -1, firstBadJ = -1;
+
     float* blocks = result->matrix_blocks;
     for(int i = 0; i < N; i++) {
         // Observation-row element's first-copy transform. The CPU assembly finalizes
@@ -264,6 +273,12 @@ void radGPU_UnpackMatrix(
         radTrans* rowTrans = intrct->MainTransPtrArray[i];
         for(int j = 0; j < N; j++) {
             long long idx = ((long long)i * N + j) * 9;
+            for(int k = 0; k < 9; k++) {
+                if(!std::isfinite(blocks[idx+k])) {
+                    blocks[idx+k] = 0.f;
+                    if(nBadEntries++ == 0) { firstBadI = i; firstBadJ = j; }
+                }
+            }
             TMatrix3d block(
                 TVector3d(blocks[idx+0], blocks[idx+1], blocks[idx+2]),
                 TVector3d(blocks[idx+3], blocks[idx+4], blocks[idx+5]),
@@ -271,6 +286,15 @@ void radGPU_UnpackMatrix(
             if(rowTrans != 0) rowTrans->TrMatrix_inv(block);
             intrct->InteractMatrix[i][j] = block;
         }
+    }
+
+    if(nBadEntries > 0) {
+        fprintf(stderr,
+            "GPU asm unpack: %lld non-finite interaction-matrix entries zeroed "
+            "(first at element pair %d,%d of %d). This indicates a degenerate "
+            "(sliver) element; check the mesh quality of those elements -- the "
+            "solve will proceed but the result near them is unreliable.\n",
+            nBadEntries, firstBadI, firstBadJ, N);
     }
 }
 

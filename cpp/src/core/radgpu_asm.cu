@@ -46,6 +46,36 @@ __device__ double Step_dev(double x)
 }
 
 // ============================================================
+// Device: log(R + u) computed without subtractive cancellation.
+//
+// `q` must satisfy q = R^2 - u^2 >= 0 analytically, so that
+//   R + u = q / (R - u)
+// can be evaluated when u ~ -R (where the direct sum has lost all of its
+// significant digits and can even round to a small NEGATIVE value, making
+// the bare log() return NaN).
+//
+// This is the fp64 branch of radgpu_log_R_plus_u_stable() in radgpu_fld.cu
+// (:108-133); the CPU reference applies the equivalent series limit in
+// radexpgn.cpp (:345-348). The direct path is taken whenever R+u carries
+// significance, so well-conditioned geometry is bit-identical to the
+// previous code -- only the near-degenerate cases change.
+// ============================================================
+__device__ __forceinline__ double radgpu_asm_log_R_plus_u(double R, double u, double q)
+{
+    const double LOG_SWITCH = 1.0e-12;   // RadGpuFldTr<double>::log_switch()
+    const double TINY_D     = 1.0e-300;  // RadGpuFldTr<double>::tiny()
+
+    double rp = R + u;
+    if(rp > LOG_SWITCH * R) return log(rp);   // safe direct path
+
+    double rm = R - u;                        // >= R, no cancellation
+    if(!(rm > 0.0) || !isfinite(rm)) rm = TINY_D;
+    if(!(q  > 0.0) || !isfinite(q))  q  = TINY_D;
+
+    return log(q) - log(rm);
+}
+
+// ============================================================
 // Device: Flat polygon B_comp for PreRelax_ mode
 // Computes Sx, Sy, Sz for a single polygon face
 // in the face's local coordinate frame
@@ -139,6 +169,30 @@ __device__ void polygon_prerelax_dev(
             double bx1 = b * x1, bx2 = b * x2;
             double R1pbpkx1 = bpkx1 + R1, R2pbpkx2 = bpkx2 + R2;
 
+            // Near-edge series limit for R + (b+kx): when that sum cancels to
+            // ~0 the naive value carries no significance, so replace it with
+            // its analytic limit q/(2|u|), q = R^2 - (b+kx)^2 = x^2 + z^2.
+            // Mirrors radgpu_fld.cu:279-296 and CPU radexpgn.cpp:345-348.
+            // Applied here so the atan arguments below use the repaired value.
+            {
+                const double RelRandMagn       = 1.0e-13;
+                const double MaxRelTolToSwitch = 1.0e-07;
+                double AbsRandR1 = 100.0 * R1 * RelRandMagn;
+                double AbsRandR2 = 100.0 * R2 * RelRandMagn;
+                double MaxAbsRandR1 = MaxRelTolToSwitch * R1;
+                double MaxAbsRandR2 = MaxRelTolToSwitch * R2;
+                if(AbsRandR1 > MaxAbsRandR1) AbsRandR1 = MaxAbsRandR1;
+                if(AbsRandR2 > MaxAbsRandR2) AbsRandR2 = MaxAbsRandR2;
+
+                if(fabs(R1pbpkx1) < AbsRandR1 && R1 > 100.0 * AbsRandR1 &&
+                   x1e2pze2 < bpkx1e2 * MaxRelTolToSwitch)
+                    R1pbpkx1 = (bpkx1 != 0.0) ? 0.5 * x1e2pze2 / fabs(bpkx1) : 1.0e-50;
+
+                if(fabs(R2pbpkx2) < AbsRandR2 && R2 > 100.0 * AbsRandR2 &&
+                   x2e2pze2 < bpkx2e2 * MaxRelTolToSwitch)
+                    R2pbpkx2 = (bpkx2 != 0.0) ? 0.5 * x2e2pze2 / fabs(bpkx2) : 1.0e-50;
+            }
+
             // Flip repair for atan summation
             double FlpRep1ForSumAtans1 = 0.0;
             double four_be2ke2 = 4.0 * be2 * ke2;
@@ -194,14 +248,22 @@ __device__ void polygon_prerelax_dev(
             ArgSumAtans1 = TransAtans_dev(ArgSumAtans1, CurArg, PiMult2);
             PiMultSumAtans1 += PiMult1 + PiMult2 + FlpRep1ForSumAtans1;
 
-            // Log terms
-            double bkpx1_over_sqrt_pR1 = bkpx1pke2x1/sqrtke2p1 + R1;
-            double bkpx2_over_sqrt_pR2 = bkpx2pke2x2/sqrtke2p1 + R2;
+            // Log terms. u = (bk + (1+k^2)x)/sqrt(1+k^2); u+R is analytically
+            // >= 0, with equality only when z->0 AND b->0 -- i.e. the observer
+            // lies both on the face plane and on the edge line. That double
+            // degeneracy is exactly the self-interaction of a sliver element,
+            // where subtractive cancellation rounds u+R to a tiny NEGATIVE and
+            // the old bare log() returned NaN. Whether it lands at +eps or
+            // -eps is decided by FMA contraction, which nvcc emits differently
+            // per architecture -- hence "NaN on one GPU, fine on another".
+            // The cancellation-free form removes the failure mode entirely.
+            double u1 = bkpx1pke2x1 / sqrtke2p1;
+            double u2 = bkpx2pke2x2 / sqrtke2p1;
+            double qv = ze2 + be2 / ke2p1;   // = R^2 - u^2, analytically >= 0
+            if(!(qv > 0.0) || !isfinite(qv)) qv = 1.0e-300;
 
-            if(bkpx1_over_sqrt_pR1 == 0.0) bkpx1_over_sqrt_pR1 = 1.0e-50;
-            if(bkpx2_over_sqrt_pR2 == 0.0) bkpx2_over_sqrt_pR2 = 1.0e-50;
-
-            double SumLogs1 = log(bkpx2_over_sqrt_pR2 / bkpx1_over_sqrt_pR1);
+            double SumLogs1 = radgpu_asm_log_R_plus_u(R2, u2, qv)
+                            - radgpu_asm_log_R_plus_u(R1, u1, qv);
             double SumLogs1dsqrtke2p1 = SumLogs1 / sqrtke2p1;
 
             if(R1pbpkx1 == 0.0) R1pbpkx1 = 1.0e-50;
@@ -216,8 +278,15 @@ __device__ void polygon_prerelax_dev(
     }
 
     double Sz_val = atan(ArgSumAtans1) + PiMultSumAtans1 * PI;
-    if(ArgSumLogs2 <= 0.0) ArgSumLogs2 = 1.0e-50;
+    if(!(ArgSumLogs2 > 0.0) || !isfinite(ArgSumLogs2)) ArgSumLogs2 = 1.0e-50;
     Sx += log(ArgSumLogs2);
+
+    // Final scrub: a degenerate face must not poison the interaction matrix
+    // with a NaN/Inf (which would surface much later as "radGPU_RelaxNK:
+    // non-finite residual at start"). Matches radgpu_fld.cu:363-365.
+    if(!isfinite(Sx))     Sx = 0.0;
+    if(!isfinite(Sy))     Sy = 0.0;
+    if(!isfinite(Sz_val)) Sz_val = 0.0;
 
     out_Sx = Sx;
     out_Sy = Sy;

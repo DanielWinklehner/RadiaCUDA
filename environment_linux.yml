@@ -11,6 +11,7 @@ dependencies:
   - scipy
   - fftw
   - cmake>=3.28
+  - h5py
   - ninja
   - setuptools
   - scikit-build-core

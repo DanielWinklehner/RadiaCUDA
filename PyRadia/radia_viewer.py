@@ -1,5 +1,6 @@
 """Lightweight 3D viewer for Radia geometries using PyVista."""
 
+import os
 import sys
 
 import numpy as np
@@ -45,8 +46,25 @@ def ensure_dpi_aware():
             continue
 
 
-def ObjDrwPyVista(obj, opacity=1.0, show_edges=True):
-    """Display a Radia object in an interactive 3D viewer.
+def is_headless():
+    """True when no interactive display is available for a GUI window.
+
+    Rule: non-Windows/non-macOS AND no usable X11 ``$DISPLAY`` (a bare Linux
+    cluster/compute node). The ``RADIA_HEADLESS`` environment variable
+    overrides autodetection (1/true/yes/on -> force headless, 0/false/no/off ->
+    force a window). Windows and macOS default to non-headless, so their
+    behaviour is unchanged unless the override is set explicitly.
+    """
+    override = os.environ.get("RADIA_HEADLESS")
+    if override is not None:
+        return override.strip().lower() in ("1", "true", "yes", "on")
+    if sys.platform in ("win32", "darwin"):
+        return False
+    return not os.environ.get("DISPLAY")
+
+
+def ObjDrwPyVista(obj, opacity=1.0, show_edges=True, off_screen=False, screenshot=None):
+    """Display a Radia object in a 3D viewer.
 
     Parameters
     ----------
@@ -56,6 +74,14 @@ def ObjDrwPyVista(obj, opacity=1.0, show_edges=True):
         Opacity of the surfaces (0.0 to 1.0).
     show_edges : bool
         Whether to draw mesh edges.
+    off_screen : bool
+        Render without opening a window (for headless screenshotting).
+    screenshot : str or None
+        If given, render off-screen and write the image to this path.
+
+    On a headless machine (no display) with neither ``off_screen`` nor
+    ``screenshot`` requested, this warns and returns instead of failing to
+    open a window. Set ``RADIA_HEADLESS=0`` to force a window anyway.
     """
     import radia as rad
 
@@ -63,10 +89,20 @@ def ObjDrwPyVista(obj, opacity=1.0, show_edges=True):
         print("PyVista not installed. Run: pip install pyvista")
         return
 
+    if is_headless() and not off_screen and screenshot is None:
+        import warnings
+        warnings.warn(
+            "ObjDrwPyVista: no display available (headless); skipping the "
+            "interactive 3D view. Pass off_screen=True or screenshot='out.png' "
+            "to render without a window, or set RADIA_HEADLESS=0 to force one.",
+            stacklevel=2,
+        )
+        return
+
     data = rad.ObjDrwVTK(obj, 'EdgeLines->False')
 
     ensure_dpi_aware()  # crisp on scaled high-DPI Windows; must precede the window
-    plotter = pv.Plotter()
+    plotter = pv.Plotter(off_screen=off_screen or screenshot is not None)
     plotter.set_background("white")
 
     # Draw polygons (solid volumes)
@@ -78,7 +114,7 @@ def ObjDrwPyVista(obj, opacity=1.0, show_edges=True):
     _add_vtk_lines(plotter, lines)
 
     plotter.add_axes()
-    plotter.show()
+    plotter.show(screenshot=screenshot)
 
 
 def _add_vtk_data(plotter, pgn_data, opacity=1.0, show_edges=True):

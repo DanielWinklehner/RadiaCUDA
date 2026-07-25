@@ -21,6 +21,8 @@
 #ifdef RADIA_WITH_CUDA
 #include "radgpu_asm.h"
 #include "radgpu_fld.h"
+#include <cmath>    // std::isfinite (GPU source-field guard)
+#include <cstdio>   // fprintf/stderr (GPU fallback diagnostics)
 #endif
 
 #ifdef _WITH_MPI
@@ -994,7 +996,68 @@ void radTInteraction::AddExternFieldFromMoreExtSource()
 		}
 		int rc = radGPU_ComputeFieldFromSrcRep((void*)(MoreExtSourceHandle.rep),
 		                                       arObs, AmOfMainElem, arB, 1); // fp64
-		if(rc == 0)
+		bool gpuUsable = (rc == 0);
+
+		// Guard 1: finiteness. This array seeds the relaxation residual, and
+		// nothing downstream checks it -- a single NaN here surfaces only much
+		// later as "radGPU_RelaxNK: non-finite residual at start".
+		if(gpuUsable)
+		{
+			for(long i = 0; i < 3L*AmOfMainElem; i++)
+			{
+				if(!std::isfinite(arB[i]))
+				{
+					fprintf(stderr, "AddExternFieldFromMoreExtSource: GPU source field "
+					        "returned a non-finite value; using the CPU field loop.\n");
+					gpuUsable = false; break;
+				}
+			}
+		}
+
+		// Guard 2: verify the B == H invariant instead of assuming it. The GPU
+		// returns B, the CPU adds H, and B = H + M -- equal ONLY where M = 0,
+		// i.e. at points outside the source material. That holds for the
+		// intended frozen-background use (relaxable part disjoint from the
+		// source), but nothing enforces it: a relaxable element whose centroid
+		// falls inside/on a source body would be seeded with a wrong, large H,
+		// which the nonlinear material law can then drive to NaN. Spot-check a
+		// sample against the CPU and fall back wholesale if they disagree.
+		if(gpuUsable)
+		{
+			radTFieldKey FldKeyChk; FldKeyChk.H_=1;
+			TVector3d ZeroChk(0.,0.,0.);
+			int nChk = (AmOfMainElem < 16)? AmOfMainElem : 16;
+			int stepChk = AmOfMainElem/nChk; if(stepChk < 1) stepChk = 1;
+			double maxAbsH = 0., maxDiff = 0.;
+
+			for(int c = 0; c < nChk; c++)
+			{
+				int StrNo = c*stepChk;
+				if(StrNo >= AmOfMainElem) break;
+				TVector3d ObsChk(arObs[3*StrNo], arObs[3*StrNo+1], arObs[3*StrNo+2]);
+				radTField FldChk(FldKeyChk, CompCriterium, ObsChk, ZeroChk, ZeroChk, ZeroChk, ZeroChk, 0.);
+				((radTg3d*)(MoreExtSourceHandle.rep))->B_genComp(&FldChk);
+
+				TVector3d Hcpu = FldChk.H;
+				TVector3d Bgpu(arB[3*StrNo], arB[3*StrNo+1], arB[3*StrNo+2]);
+				TVector3d dVec = Hcpu - Bgpu;
+				double aH = Hcpu.Abs(), aD = dVec.Abs();
+				if(aH > maxAbsH) maxAbsH = aH;
+				if(aD > maxDiff)  maxDiff = aD;
+			}
+
+			double tolChk = 1.e-6*maxAbsH + 1.e-12;
+			if(maxDiff > tolChk)
+			{
+				fprintf(stderr, "AddExternFieldFromMoreExtSource: GPU source field (B) "
+				        "disagrees with the CPU field (H) by %.3e (tol %.3e) -- the "
+				        "relaxable elements are not disjoint from the frozen source, "
+				        "so B != H. Using the CPU field loop.\n", maxDiff, tolChk);
+				gpuUsable = false;
+			}
+		}
+
+		if(gpuUsable)
 		{
 			for(int StrNo=0; StrNo<AmOfMainElem; StrNo++)
 			{
@@ -1002,10 +1065,10 @@ void radTInteraction::AddExternFieldFromMoreExtSource()
 				ExternFieldArray[StrNo] += MainTransPtrArray[StrNo]->TrVectField_inv(Blab);
 			}
 			delete[] arObs; delete[] arB;
-			return; // GPU path succeeded
+			return; // GPU path succeeded and was verified
 		}
 		delete[] arObs; delete[] arB;
-		// rc != 0: GPU unavailable / unsupported source -> CPU fallback below
+		// GPU unavailable / unsupported / unverified -> CPU fallback below
 	}
 #endif
 
