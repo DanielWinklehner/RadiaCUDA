@@ -276,6 +276,19 @@ static RadGPU_MatStreamCtx g_matStream = {nullptr, 0, {nullptr, nullptr},
                                           {nullptr, nullptr}, {0, 0}, 0,
                                           nullptr, 0, 0};
 
+// Diagnostic: how many FULL matrix passes a solve really performs. The
+// solvers report an iteration count that may bundle several passes (Newton
+// step + GMRES inner iterations + preconditioner), which makes per-iteration
+// timings impossible to compare against the matvec's roofline cost.
+static long long g_matvecCalls = 0;
+
+// RADIA_RLX_DEBUG=1 reports the pass count at the end of a solve.
+static int radGPU_RlxDebug()
+{
+    const char* e = getenv("RADIA_RLX_DEBUG");
+    return (e && *e)? atoi(e) : 0;
+}
+
 static void radGPU_MatStreamRelease()
 {
     for(int b = 0; b < 2; b++) {
@@ -408,6 +421,7 @@ static void radGPU_Matvec(const float* d_matrix,
                           const double* d_x, const double* d_ext,
                           double* d_out, int N3, int blkMV, int tpb)
 {
+    g_matvecCalls++;
     if(!g_matStream.active) {
         matvec_add_extfield_kernel<<<blkMV, tpb>>>(d_matrix, d_x, d_ext, d_out, N3);
         return;
@@ -780,6 +794,7 @@ int radGPU_RelaxAuto(
     double* outMaxModM,
     double* outMaxModH)
 {
+    g_matvecCalls = 0;
     int N = data->numElem;
     int N3 = data->matrixDim;
     long long matSize = (long long)N3 * N3;
@@ -1282,6 +1297,9 @@ int radGPU_RelaxAuto(
         *outMaxModM = maxModM;
         *outMaxModH = maxModH;
         result = iterDone;
+        if(radGPU_RlxDebug()) fprintf(stderr, "radGPU RelaxAuto: %lld matrix passes for %d reported iterations (%.2f passes/iteration)\n",
+                g_matvecCalls, result,
+                (result > 0) ? (double)g_matvecCalls / result : 0.0);
     }
 
 cleanup:
@@ -1631,6 +1649,7 @@ int radGPU_RelaxNK(
     double* outMaxModM,
     double* outMaxModH)
 {
+    g_matvecCalls = 0;
     int N = data->numElem;
     int N3 = data->matrixDim;
     long long matSize = (long long)N3 * N3;
@@ -2197,6 +2216,9 @@ int radGPU_RelaxNK(
         *outMaxModM = maxModM;
         *outMaxModH = maxModH;
         result = (matvecs > 0) ? matvecs : 1;
+        if(radGPU_RlxDebug()) fprintf(stderr, "radGPU RelaxNK: %lld matrix passes for %d reported iterations (%.2f passes/iteration)\n",
+                g_matvecCalls, result,
+                (result > 0) ? (double)g_matvecCalls / result : 0.0);
 
         #undef NK_EVAL_FDP
     }
