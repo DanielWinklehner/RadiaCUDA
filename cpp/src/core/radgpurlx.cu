@@ -259,14 +259,22 @@ __global__ void matvec_tile_add_extfield_kernel(
 // after the matrix has been found not to fit; `active == 0` is the resident path.
 struct RadGPU_MatStreamCtx {
     const float* h_matrix;      // full row-major matrix, host-resident (not owned)
-    float* h_pin[2];            // pinned staging tiles
-    float* d_tile[2];           // device tiles
+    int registered;             // h_matrix page-locked by us -> DMA straight out
+                                // of it, no staging copy
+    float* h_pin[2];            // pinned staging tiles (only when NOT registered)
+    float* d_tile[2];           // device tiles for the streamed rows
     cudaStream_t stream[2];
     int rowsPerTile;
+    // Rows [0, residentRows) live on the device permanently and never cross
+    // PCIe; only [residentRows, N3) is streamed. A matrix modestly over the
+    // VRAM limit therefore moves only its overflow each matvec, not all of it.
+    float* d_resident;
+    int residentRows;
     int active;
 };
-static RadGPU_MatStreamCtx g_matStream = {nullptr, {nullptr, nullptr},
-                                          {nullptr, nullptr}, {0, 0}, 0, 0};
+static RadGPU_MatStreamCtx g_matStream = {nullptr, 0, {nullptr, nullptr},
+                                          {nullptr, nullptr}, {0, 0}, 0,
+                                          nullptr, 0, 0};
 
 static void radGPU_MatStreamRelease()
 {
@@ -275,50 +283,122 @@ static void radGPU_MatStreamRelease()
         if(g_matStream.h_pin[b])  { cudaFreeHost(g_matStream.h_pin[b]); g_matStream.h_pin[b] = nullptr; }
         if(g_matStream.stream[b]) { cudaStreamDestroy(g_matStream.stream[b]); g_matStream.stream[b] = nullptr; }
     }
+    if(g_matStream.d_resident) { cudaFree(g_matStream.d_resident); g_matStream.d_resident = nullptr; }
+    if(g_matStream.registered && g_matStream.h_matrix) {
+        cudaHostUnregister((void*)g_matStream.h_matrix);
+    }
+    g_matStream.registered = 0;
     g_matStream.h_matrix = nullptr;
     g_matStream.rowsPerTile = 0;
+    g_matStream.residentRows = 0;
     g_matStream.active = 0;
 }
 
 // Arm streaming for a matrix that stays in host RAM. Returns 0 on success.
 // `reserveB` is the device memory the caller still needs for its O(N) work
 // arrays, which the tiles must not eat into.
+// Target size of one streaming tile. Big enough that each H2D transfer runs at
+// full PCIe rate (small transfers are latency-bound), small enough that two of
+// them leave most of the card for the resident block.
+#define RADGPU_STREAM_TILE_BYTES (64u << 20)
+
 static int radGPU_MatStreamArm(const float* h_matrix, int N3, size_t reserveB)
 {
     radGPU_MatStreamRelease();
     if(!h_matrix || N3 <= 0) return -1;
 
     size_t rowBytes = (size_t)N3 * sizeof(float);
+    size_t matBytes = rowBytes * (size_t)N3;
     size_t freeB = 0, totalB = 0;
     if(cudaMemGetInfo(&freeB, &totalB) != cudaSuccess) return -1;
-    size_t budget = (freeB > reserveB)? (size_t)((double)(freeB - reserveB) * 0.70) : 0;
-    size_t rows = (rowBytes > 0)? (budget / (2 * rowBytes)) : 0;   // two tiles
-    if(rows < 1) {
-        fprintf(stderr, "radGPU: streaming matvec cannot fit even one row "
-                        "(N3=%d); not enough free GPU memory.\n", N3);
-        return -1;
-    }
-    if(rows > (size_t)N3) rows = (size_t)N3;
+    size_t budget = (freeB > reserveB)? (size_t)((double)(freeB - reserveB) * 0.90) : 0;
 
-    g_matStream.rowsPerTile = (int)rows;
+    // Tiles first (streaming must be possible at all), resident block second
+    // (it only ever reduces how much has to move).
+    size_t rows = RADGPU_STREAM_TILE_BYTES / (rowBytes ? rowBytes : 1);
+    if(rows < 1) rows = 1;
+    if(rows > (size_t)N3) rows = (size_t)N3;
     size_t tileB = rows * rowBytes;
+    if(2 * tileB > budget) {
+        rows = budget / (2 * (rowBytes ? rowBytes : 1));
+        if(rows < 1) {
+            fprintf(stderr, "radGPU: streaming matvec cannot fit even one row "
+                            "(N3=%d); not enough free GPU memory.\n", N3);
+            return -1;
+        }
+        tileB = rows * rowBytes;
+    }
+    g_matStream.rowsPerTile = (int)rows;
+
     for(int b = 0; b < 2; b++) {
         if(cudaMalloc(&g_matStream.d_tile[b], tileB) != cudaSuccess) { radGPU_MatStreamRelease(); return -1; }
-        // Pinned staging keeps the H2D copies asynchronous (a pageable source
-        // would serialize them and defeat the double buffering).
-        if(cudaHostAlloc(&g_matStream.h_pin[b], tileB, cudaHostAllocDefault) != cudaSuccess) { radGPU_MatStreamRelease(); return -1; }
         if(cudaStreamCreate(&g_matStream.stream[b]) != cudaSuccess) { radGPU_MatStreamRelease(); return -1; }
     }
+
+    // Page-lock the matrix where it already sits, so the tile DMAs read it
+    // directly. The staging copy this replaces was a full CPU-side memcpy per
+    // tile on the critical path -- measured at ~34% of PCIe roofline with it,
+    // because each tile cost copy + transfer instead of just transfer.
+    g_matStream.registered = 0;
+    if(cudaHostRegister((void*)h_matrix, matBytes, cudaHostRegisterPortable) == cudaSuccess) {
+        g_matStream.registered = 1;
+    }
+    else {
+        // Too much already pinned, or the allocation cannot be locked: fall
+        // back to staging through our own pinned tiles. Slower, still correct.
+        cudaGetLastError();   // clear the sticky error from the failed attempt
+        for(int b = 0; b < 2; b++) {
+            if(cudaHostAlloc(&g_matStream.h_pin[b], tileB, cudaHostAllocDefault) != cudaSuccess) {
+                radGPU_MatStreamRelease(); return -1;
+            }
+        }
+    }
+
+    // Whatever is left over holds rows that never have to move again.
+    // RADGPU_STREAM_RESIDENT_FRAC caps the resident share as a fraction of the
+    // matrix -- it exists so the split can be exercised (and diffed against an
+    // in-core solve) on a model small enough to run both ways; RADGPU_FORCE_STREAM
+    // alone means resident 0, i.e. the pure-streaming worst case.
+    g_matStream.residentRows = 0;
+    {
+        double capFrac = radGPU_ForceStream() ? 0.0 : 1.0;
+        const char* fr = getenv("RADGPU_STREAM_RESIDENT_FRAC");
+        if(fr && *fr) {
+            capFrac = atof(fr);
+            if(capFrac < 0.0) capFrac = 0.0;
+            if(capFrac > 1.0) capFrac = 1.0;
+        }
+        size_t freeNow = 0;
+        if(capFrac > 0.0 && cudaMemGetInfo(&freeNow, &totalB) == cudaSuccess
+           && freeNow > reserveB) {
+            size_t resB = (size_t)((double)(freeNow - reserveB) * 0.90);
+            size_t resRows = resB / (rowBytes ? rowBytes : 1);
+            size_t cap = (size_t)(capFrac * (double)N3);
+            if(resRows > cap) resRows = cap;
+            if(resRows > (size_t)N3) resRows = (size_t)N3;
+            if(resRows > 0 && cudaMalloc(&g_matStream.d_resident, resRows * rowBytes) == cudaSuccess) {
+                if(cudaMemcpy(g_matStream.d_resident, h_matrix, resRows * rowBytes,
+                              cudaMemcpyHostToDevice) == cudaSuccess) {
+                    g_matStream.residentRows = (int)resRows;
+                }
+                else { cudaFree(g_matStream.d_resident); g_matStream.d_resident = nullptr; }
+            }
+            else { cudaGetLastError(); }
+        }
+    }
+
     g_matStream.h_matrix = h_matrix;
     g_matStream.active = 1;
 
-    double perMatvecGB = (double)N3 * N3 * sizeof(float) / 1e9;
+    double movedGB = (double)(N3 - g_matStream.residentRows) * rowBytes / 1e9;
     fprintf(stderr,
-        "radGPU: streaming interaction matrix from host RAM "
-        "(%.1f GB per matvec, %d rows/tile x 2 buffers = %.2f GB on device). "
-        "Every iteration now moves the whole matrix over PCIe -- expect it to "
-        "be MUCH slower than an in-core solve.\n",
-        perMatvecGB, g_matStream.rowsPerTile, 2.0 * tileB / 1e9);
+        "radGPU: interaction matrix %.1f GB, %d of %d rows resident on the "
+        "device -- %.1f GB crosses PCIe per matvec (%d rows/tile x 2, %s). "
+        "Expect this to be slower than a fully in-core solve.\n",
+        (double)matBytes / 1e9, g_matStream.residentRows, N3, movedGB,
+        g_matStream.rowsPerTile,
+        g_matStream.registered ? "matrix page-locked in place"
+                               : "staged through pinned buffers");
     return 0;
 }
 
@@ -334,13 +414,27 @@ static void radGPU_Matvec(const float* d_matrix,
     }
     const int R = g_matStream.rowsPerTile;
     const int warpsPerBlock = tpb >> 5;
-    for(int r0 = 0, b = 0; r0 < N3; r0 += R, b ^= 1) {
+    const int resRows = g_matStream.residentRows;
+
+    // Resident rows: no transfer at all, issued first so the DMAs behind it
+    // overlap with this kernel.
+    if(resRows > 0) {
+        int blocks = (resRows + warpsPerBlock - 1) / warpsPerBlock;
+        matvec_tile_add_extfield_kernel<<<blocks, tpb, 0, g_matStream.stream[0]>>>(
+            g_matStream.d_resident, d_x, d_ext, d_out, resRows, N3);
+    }
+
+    for(int r0 = resRows, b = 1; r0 < N3; r0 += R, b ^= 1) {
         int nRows = (N3 - r0 < R)? (N3 - r0) : R;
         size_t bytes = (size_t)nRows * N3 * sizeof(float);
-        // Wait for the previous use of THIS buffer before refilling it.
+        const float* src = g_matStream.h_matrix + (long long)r0 * N3;
+        // Wait for the previous use of THIS buffer before overwriting it.
         cudaStreamSynchronize(g_matStream.stream[b]);
-        memcpy(g_matStream.h_pin[b], g_matStream.h_matrix + (long long)r0 * N3, bytes);
-        cudaMemcpyAsync(g_matStream.d_tile[b], g_matStream.h_pin[b], bytes,
+        if(!g_matStream.registered) {
+            memcpy(g_matStream.h_pin[b], src, bytes);
+            src = g_matStream.h_pin[b];
+        }
+        cudaMemcpyAsync(g_matStream.d_tile[b], src, bytes,
                         cudaMemcpyHostToDevice, g_matStream.stream[b]);
         int blocks = (nRows + warpsPerBlock - 1) / warpsPerBlock;
         matvec_tile_add_extfield_kernel<<<blocks, tpb, 0, g_matStream.stream[b]>>>(
