@@ -1230,6 +1230,13 @@ int radTApplication::MakeManualRelax(int InteractElemKey, int MethNo, int IterNu
 		if(IterNumber<0) { Send.ErrorMessage("Radia::Error019"); return 0;}
 		if((RelaxParam<0.) || (RelaxParam>1.)) { Send.ErrorMessage("Radia::Error018"); return 0;}
 
+		//RadiaCUDA: all these methods relax through InteractMatrix, which is
+		//materialized lazily when the GPU assembled the matrix
+		//(studies/ASM_SOLVE_HANDOFF.md phase 3). Requested here, where a failure
+		//can still be reported, rather than left to the relaxation constructor.
+		//Method 0 is a plain ResetM and needs no matrix.
+		if((MethNo != 0) && (!InteractPtr->EnsureInteractMatrix())) return 0;
+
 		switch(MethNo)
 		{
 		case 0:
@@ -1331,6 +1338,14 @@ int radTApplication::MakeAutoRelax(int InteractElemKey, double PrecOnMagnetiz, i
 				BufNameString++; BufValString++;
 			}
 
+			//RadiaCUDA: methods 3/4/5/8 are CPU relaxations reading
+			//InteractMatrix, which is materialized lazily when the GPU
+			//assembled the matrix (studies/ASM_SOLVE_HANDOFF.md phase 3).
+			//Methods 9/10/11 ask for it only where they actually end up on the
+			//CPU (below) -- asking here would rebuild the host matrix on every
+			//GPU solve, which is exactly what phase 3 avoids.
+			if((MethNo < 9) && (!InteractPtr->EnsureInteractMatrix())) return 0;
+
 			//int ActualIterNum = 0;
 			switch(MethNo)
 			{
@@ -1376,6 +1391,8 @@ case 8:
 			if(InteractPtr->AmOfRelaxSubInterv != 0)
 			{
 				Send.WarningMessage("Radia::Warning023");
+				//RadiaCUDA: leaving the GPU -- the CPU solver needs the host matrix.
+				if(!InteractPtr->EnsureInteractMatrix()) return 0;
 				radTRelaxationMethNo_a5 RelaxMethNo_a5(InteractPtr);
 				ActualIterNum = RelaxMethNo_a5.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded);
 				break;
@@ -1391,6 +1408,8 @@ case 8:
 			{//MethNo == 10, or method 9 without CUDA in the build (e.g. an MPI
 			 //CPU-cluster build), or the GPU solver failed: run the CPU
 			 //implementation of the same algorithm.
+				//RadiaCUDA: leaving the GPU -- the CPU solver needs the host matrix.
+				if(!InteractPtr->EnsureInteractMatrix()) return 0;
 				radTRelaxationMethNo_10 RelaxMethNo_10(InteractPtr);
 				ActualIterNum = RelaxMethNo_10.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded, gpuOmega);
 			}
@@ -1408,6 +1427,8 @@ case 8:
 			if(InteractPtr->AmOfRelaxSubInterv != 0)
 			{
 				Send.WarningMessage("Radia::Warning023");
+				//RadiaCUDA: leaving the GPU -- the CPU solver needs the host matrix.
+				if(!InteractPtr->EnsureInteractMatrix()) return 0;
 				radTRelaxationMethNo_a5 RelaxMethNo_a5(InteractPtr);
 				ActualIterNum = RelaxMethNo_a5.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded);
 				break;
@@ -1422,6 +1443,8 @@ case 8:
 			 //call still produces a solve, and say so.
 				fprintf(stderr, "RlxAuto method 11 (GPU Newton-Krylov) unavailable; "
 				        "falling back to CPU method 10.\n");
+				//RadiaCUDA: leaving the GPU -- the CPU solver needs the host matrix.
+				if(!InteractPtr->EnsureInteractMatrix()) return 0;
 				radTRelaxationMethNo_10 RelaxMethNo_10(InteractPtr);
 				ActualIterNum = RelaxMethNo_10.AutoRelax(PrecOnMagnetiz, MaxIterNumber, MagnResetIsNotNeeded, gpuOmega);
 			}

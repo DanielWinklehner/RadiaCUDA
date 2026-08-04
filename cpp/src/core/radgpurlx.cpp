@@ -31,24 +31,36 @@ int radGPU_PackInteractionData(radTInteraction* intrct, RadGPURelaxData* data, i
     data->matrixDim = N3;
     data->matrixStamp = intrct->mGpuMatrixStamp;
 
-    // --- Flatten interaction matrix: TMatrix3df[N][N] -> float[N3 x N3] row-major ---
+    // --- Interaction matrix as float[N3 x N3] row-major ---
     // (skipped when the caller verified the device cache already holds this
     // interaction's matrix -- h_matrix stays null and the resident copy is used)
     if(!skipMatrix) {
-        data->h_matrix = new float[(long long)N3 * N3];
-        for(int i = 0; i < N; i++) {
-            for(int j = 0; j < N; j++) {
-                TMatrix3df& blk = intrct->InteractMatrix[i][j];
-                int r0 = 3 * i, c0 = 3 * j;
-                data->h_matrix[(long long)(r0+0)*N3 + c0+0] = blk.Str0.x;
-                data->h_matrix[(long long)(r0+0)*N3 + c0+1] = blk.Str0.y;
-                data->h_matrix[(long long)(r0+0)*N3 + c0+2] = blk.Str0.z;
-                data->h_matrix[(long long)(r0+1)*N3 + c0+0] = blk.Str1.x;
-                data->h_matrix[(long long)(r0+1)*N3 + c0+1] = blk.Str1.y;
-                data->h_matrix[(long long)(r0+1)*N3 + c0+2] = blk.Str1.z;
-                data->h_matrix[(long long)(r0+2)*N3 + c0+0] = blk.Str2.x;
-                data->h_matrix[(long long)(r0+2)*N3 + c0+1] = blk.Str2.y;
-                data->h_matrix[(long long)(r0+2)*N3 + c0+2] = blk.Str2.z;
+        if(intrct->mAsmMatrix != nullptr) {
+            // The GPU assembled this matrix and the interaction still holds its
+            // output, which IS this layout. Borrow it: no flatten, and -- the
+            // point of phase 3 -- no second host copy of 36*N^2 bytes.
+            data->h_matrix = intrct->mAsmMatrix;
+            data->h_matrixOwned = 0;
+        }
+        else {
+            // Assembled on the CPU (or already converted to TMatrix3df form by
+            // EnsureInteractMatrix): flatten as before.
+            data->h_matrix = new float[(long long)N3 * N3];
+            data->h_matrixOwned = 1;
+            for(int i = 0; i < N; i++) {
+                for(int j = 0; j < N; j++) {
+                    TMatrix3df& blk = intrct->InteractMatrix[i][j];
+                    int r0 = 3 * i, c0 = 3 * j;
+                    data->h_matrix[(long long)(r0+0)*N3 + c0+0] = blk.Str0.x;
+                    data->h_matrix[(long long)(r0+0)*N3 + c0+1] = blk.Str0.y;
+                    data->h_matrix[(long long)(r0+0)*N3 + c0+2] = blk.Str0.z;
+                    data->h_matrix[(long long)(r0+1)*N3 + c0+0] = blk.Str1.x;
+                    data->h_matrix[(long long)(r0+1)*N3 + c0+1] = blk.Str1.y;
+                    data->h_matrix[(long long)(r0+1)*N3 + c0+2] = blk.Str1.z;
+                    data->h_matrix[(long long)(r0+2)*N3 + c0+0] = blk.Str2.x;
+                    data->h_matrix[(long long)(r0+2)*N3 + c0+1] = blk.Str2.y;
+                    data->h_matrix[(long long)(r0+2)*N3 + c0+2] = blk.Str2.z;
+                }
             }
         }
     }
@@ -215,13 +227,31 @@ int radGPU_PackInteractionData(radTInteraction* intrct, RadGPURelaxData* data, i
     }
 
     // --- Self-interaction diagonal blocks ---
+    // These are read on EVERY GPU solve, including the ones that skip the
+    // matrix entirely because the device cache is warm, so this must never be
+    // the thing that forces the host matrix to be materialized -- that would
+    // rebuild the whole 36*N^2 host copy per solve and undo phase 3. Take them
+    // from whichever representation the interaction already holds; either way
+    // it is 9 floats per element, O(N).
     data->h_selfBlocks = new float[9 * N];
-    for(int i = 0; i < N; i++) {
-        TMatrix3df& blk = intrct->InteractMatrix[i][i];
-        float* sb = data->h_selfBlocks + 9 * i;
-        sb[0] = blk.Str0.x; sb[1] = blk.Str0.y; sb[2] = blk.Str0.z;
-        sb[3] = blk.Str1.x; sb[4] = blk.Str1.y; sb[5] = blk.Str1.z;
-        sb[6] = blk.Str2.x; sb[7] = blk.Str2.y; sb[8] = blk.Str2.z;
+    if(intrct->mAsmMatrix != nullptr) {
+        const float* m = intrct->mAsmMatrix;
+        for(int i = 0; i < N; i++) {
+            float* sb = data->h_selfBlocks + 9 * i;
+            for(int r = 0; r < 3; r++) {
+                const float* row = m + (long long)(3*i + r) * N3 + 3*i;
+                sb[3*r+0] = row[0]; sb[3*r+1] = row[1]; sb[3*r+2] = row[2];
+            }
+        }
+    }
+    else {
+        for(int i = 0; i < N; i++) {
+            TMatrix3df& blk = intrct->InteractMatrix[i][i];
+            float* sb = data->h_selfBlocks + 9 * i;
+            sb[0] = blk.Str0.x; sb[1] = blk.Str0.y; sb[2] = blk.Str0.z;
+            sb[3] = blk.Str1.x; sb[4] = blk.Str1.y; sb[5] = blk.Str1.z;
+            sb[6] = blk.Str2.x; sb[7] = blk.Str2.y; sb[8] = blk.Str2.z;
+        }
     }
 
     return 1;
@@ -256,7 +286,10 @@ void radGPU_UnpackMagnetization(RadGPURelaxData* data, radTInteraction* intrct)
 void radGPU_FreeData(RadGPURelaxData* data)
 {
     if(!data) return;
-    delete[] data->h_matrix;       data->h_matrix = nullptr;
+    // Only if the pack allocated it -- when it was borrowed from the
+    // interaction object, that object still owns it.
+    if(data->h_matrixOwned) delete[] data->h_matrix;
+    data->h_matrix = nullptr;      data->h_matrixOwned = 0;
     delete[] data->h_magn;         data->h_magn = nullptr;
     delete[] data->h_field;        data->h_field = nullptr;
     delete[] data->h_extField;     data->h_extField = nullptr;

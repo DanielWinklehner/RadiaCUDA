@@ -443,41 +443,14 @@ int radGPU_PackGeometryForAsm(
     return 1;
 }
 
-// ============================================================
-// Unpack GPU matrix into Radia's TMatrix3df format
-// ============================================================
-void radGPU_UnpackMatrix(
-    RadGPU_AsmResult* result,
-    radTInteraction* intrct)
-{
-    int N = result->N;
-    if(N != intrct->AmOfMainElem) {
-        fprintf(stderr, "GPU asm unpack: N mismatch (%d vs %d)\n", N, intrct->AmOfMainElem);
-        return;
-    }
-
-    // Pure layout read now: matrix_blocks arrives in the solver's SCALAR
-    // row-major layout with the row transform (MainTransPtrArray[i]->
-    // TrMatrix_inv) and the non-finite backstop ALREADY applied by the kernel
-    // (store_block_rowmajor in radgpu_asm.cu), which also reports the scrub.
-    // Doing both there is what lets the GPU->solver hand-off skip the host
-    // entirely; this function survives only for consumers that genuinely need
-    // radia's TMatrix3df form -- CPU relaxation, ShowInteractMatrix.
-    const int N3 = 3 * N;
-    const float* mat = result->matrix_blocks;
-    for(int i = 0; i < N; i++) {
-        const float* r0 = mat + (long long)(3*i + 0) * N3;
-        const float* r1 = mat + (long long)(3*i + 1) * N3;
-        const float* r2 = mat + (long long)(3*i + 2) * N3;
-        for(int j = 0; j < N; j++) {
-            int c = 3 * j;
-            intrct->InteractMatrix[i][j] = TMatrix3d(
-                TVector3d(r0[c], r0[c+1], r0[c+2]),
-                TVector3d(r1[c], r1[c+1], r1[c+2]),
-                TVector3d(r2[c], r2[c+1], r2[c+2]));
-        }
-    }
-}
+// The eager unpack into radTInteraction::InteractMatrix that used to live here
+// is gone (phase 3, studies/ASM_SOLVE_HANDOFF.md): matrix_blocks arrives in the
+// solver's SCALAR row-major layout with the row transform
+// (MainTransPtrArray[i]->TrMatrix_inv) and the non-finite backstop ALREADY
+// applied by the kernel (store_block_rowmajor in radgpu_asm.cu), so the
+// interaction now simply keeps this buffer. The same layout read, on demand and
+// for the consumers that genuinely need radia's TMatrix3df form, is
+// radTInteraction::EnsureInteractMatrix (radintrc.cpp).
 
 void radGPU_FreeObsQuadData(RadGPU_ObsQuadData* qd)
 {

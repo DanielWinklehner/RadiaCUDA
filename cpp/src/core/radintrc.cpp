@@ -66,6 +66,9 @@ radTInteraction::radTInteraction()
 	AmOfMainElem = 0;
 	AmOfExtElem = 0;
 	InteractMatrix = NULL;
+#ifdef RADIA_WITH_CUDA
+	mAsmMatrix = NULL;
+#endif
 	ExternFieldArray = NULL;
 	AuxOldMagnArray = NULL;
 	AuxOldFieldArray = NULL;
@@ -88,6 +91,9 @@ int radTInteraction::Setup(const radThg& In_hg, const radThg& In_hgMoreExtSrc, c
 	AmOfMainElem = 0;
 	AmOfExtElem = 0;
 	InteractMatrix = NULL;
+#ifdef RADIA_WITH_CUDA
+	mAsmMatrix = NULL;
+#endif
 	ExternFieldArray = NULL;
 	AuxOldMagnArray = NULL;
 	AuxOldFieldArray = NULL;
@@ -213,6 +219,11 @@ void radTInteraction::DeallocateMemory() //OC27122019
 			delete[] InteractMatrix;
 		}
 	}
+	InteractMatrix = NULL;
+
+#ifdef RADIA_WITH_CUDA
+	if(mAsmMatrix != NULL) { delete[] mAsmMatrix; mAsmMatrix = NULL;}
+#endif
 
 	g3dExternPtrVect.erase(g3dExternPtrVect.begin(), g3dExternPtrVect.end()); //OC240408, to enable current scaling/update
 
@@ -374,10 +385,6 @@ void radTInteraction::AllocateMemory(char AuxOldMagnArrayIsNeeded)
 
 		NewMagnArray = new TVector3d[AmOfMainElem];
 		NewFieldArray = new TVector3d[AmOfMainElem];
-		InteractMatrix = new TMatrix3df*[AmOfMainElem]; //OC250504
-		//InteractMatrix = new TMatrix3d*[AmOfMainElem]; //OC250504
-
-		for(int k=0; k<AmOfMainElem; k++) InteractMatrix[k] = NULL;
 	//}
 	//catch (radTException* radExceptionPtr)
 	//{
@@ -388,51 +395,10 @@ void radTInteraction::AllocateMemory(char AuxOldMagnArrayIsNeeded)
 	//	Send.ErrorMessage("Radia::Error999"); return;
 	//}
 
-	if(MemAllocTotAtOnce)
-	{
-		TMatrix3df* GenMatrPtr = 0; //OC250504
-		//TMatrix3d* GenMatrPtr = 0; //OC250504
-		//try
-		//{
-			GenMatrPtr = new TMatrix3df[AmOfMainElem*AmOfMainElem]; //OC250504
-			//GenMatrPtr = new TMatrix3d[AmOfMainElem*AmOfMainElem]; //OC250504
-		//}
-		//catch (radTException* radExceptionPtr)
-		//{
-		//	InteractMatrix[0] = NULL;
-		//	SomethingIsWrong = 1;
-		//	Send.ErrorMessage(radExceptionPtr->what());	return;
-		//}
-		//catch (...)
-		//{
-		//	Send.ErrorMessage("Radia::Error999"); return;
-		//}
-
-		if(GenMatrPtr != 0) // Check for allocation failure
-			for(int i=0; i<AmOfMainElem; i++) InteractMatrix[i] = &(GenMatrPtr[i*AmOfMainElem]);
-		else
-		{
-			InteractMatrix[0] = NULL;
-			SomethingIsWrong = 1;
-			Send.ErrorMessage("Radia::Error900"); return;
-		}
-	}
-	else
-	{
-		for(int i=0; i<AmOfMainElem; i++)
-		{
-			InteractMatrix[i] = new TMatrix3df[AmOfMainElem]; //OC250504
-			//InteractMatrix[i] = new TMatrix3d[AmOfMainElem]; //OC250504
-			if(InteractMatrix[i] == 0) // Check for allocation failure
-			{
-				for(int k=0; k<i; k++) delete[] (InteractMatrix[i]);
-				delete[] InteractMatrix;
-
-				SomethingIsWrong = 1;
-				Send.ErrorMessage("Radia::Error900"); return;
-			}
-		}
-	}
+	//RadiaCUDA: InteractMatrix is NOT allocated here any more -- see
+	//AllocateInteractMatrix below. It used to be, which meant the 36*N^2 host
+	//array existed before anyone knew whether the GPU would take the matrix,
+	//and it then coexisted with the assembly's own copy of the same data.
 
 	int MaxSubIntervArraySize = 2 * ((int)(RelaxSubIntervConstrVect.size())) + 1; // New
 	//try
@@ -447,6 +413,113 @@ void radTInteraction::AllocateMemory(char AuxOldMagnArrayIsNeeded)
 	//{
 	//	Send.ErrorMessage("Radia::Error999"); return;
 	//}
+}
+
+//-------------------------------------------------------------------------
+
+int radTInteraction::AllocateInteractMatrix()
+{//RadiaCUDA: the InteractMatrix half of what AllocateMemory used to do, split
+ //out so it can happen AFTER the GPU has either taken the matrix or declined.
+ //Unchanged otherwise: same two layouts (one block, or row by row), same errors.
+	if(InteractMatrix != NULL) return 1;
+	if(AmOfMainElem <= 0) return 0;
+
+	InteractMatrix = new TMatrix3df*[AmOfMainElem]; //OC250504
+	//InteractMatrix = new TMatrix3d*[AmOfMainElem]; //OC250504
+	if(InteractMatrix == 0)
+	{
+		SomethingIsWrong = 1;
+		Send.ErrorMessage("Radia::Error900"); return 0;
+	}
+	for(int k=0; k<AmOfMainElem; k++) InteractMatrix[k] = NULL;
+
+	if(MemAllocTotAtOnce)
+	{
+		TMatrix3df* GenMatrPtr = 0; //OC250504
+		//TMatrix3d* GenMatrPtr = 0; //OC250504
+		GenMatrPtr = new TMatrix3df[((long long)AmOfMainElem)*((long long)AmOfMainElem)]; //OC250504
+		//GenMatrPtr = new TMatrix3d[AmOfMainElem*AmOfMainElem]; //OC250504
+
+		if(GenMatrPtr != 0) // Check for allocation failure
+			for(long long i=0; i<AmOfMainElem; i++) InteractMatrix[i] = &(GenMatrPtr[i*((long long)AmOfMainElem)]);
+		else
+		{
+			InteractMatrix[0] = NULL;
+			SomethingIsWrong = 1;
+			Send.ErrorMessage("Radia::Error900"); return 0;
+		}
+	}
+	else
+	{
+		for(int i=0; i<AmOfMainElem; i++)
+		{
+			InteractMatrix[i] = new TMatrix3df[AmOfMainElem]; //OC250504
+			//InteractMatrix[i] = new TMatrix3d[AmOfMainElem]; //OC250504
+			if(InteractMatrix[i] == 0) // Check for allocation failure
+			{
+				for(int k=0; k<i; k++) delete[] (InteractMatrix[k]);
+				delete[] InteractMatrix; InteractMatrix = NULL;
+
+				SomethingIsWrong = 1;
+				Send.ErrorMessage("Radia::Error900"); return 0;
+			}
+		}
+	}
+	return 1;
+}
+
+//-------------------------------------------------------------------------
+
+int radTInteraction::EnsureInteractMatrix()
+{//RadiaCUDA: hand out InteractMatrix, building it first if the matrix
+ //currently lives in the GPU assembly's flat buffer instead.
+ //
+ //Called wherever InteractMatrix is read after an assembly that the GPU could
+ //have serviced: the CPU relaxation methods (through their common base
+ //constructor, radrlmet.h), ShowInteractMatrix, DumpBin.
+	if(InteractMatrix != NULL) return 1;
+	if(AmOfMainElem <= 0) return 0;
+
+#ifdef RADIA_WITH_CUDA
+	if(mAsmMatrix != NULL)
+	{
+		if(!AllocateInteractMatrix()) return 0;
+
+		//Pure layout read. mAsmMatrix is scalar row-major [N3 x N3] with the row
+		//transform and the non-finite backstop already applied by the assembly
+		//kernel, so this is the same conversion the assembly used to do eagerly
+		//for every matrix, and bit-identical to it (float -> double -> float is
+		//exact).
+		const long long N3 = 3*((long long)AmOfMainElem);
+		for(int i=0; i<AmOfMainElem; i++)
+		{
+			const float *r0 = mAsmMatrix + (3*((long long)i)    )*N3;
+			const float *r1 = mAsmMatrix + (3*((long long)i) + 1)*N3;
+			const float *r2 = mAsmMatrix + (3*((long long)i) + 2)*N3;
+			for(int j=0; j<AmOfMainElem; j++)
+			{
+				int c = 3*j;
+				InteractMatrix[i][j] = TMatrix3d(
+					TVector3d(r0[c], r0[c+1], r0[c+2]),
+					TVector3d(r1[c], r1[c+1], r1[c+2]),
+					TVector3d(r2[c], r2[c+1], r2[c+2]));
+			}
+		}
+
+		//Exactly one host copy at a time -- keeping both would put peak memory
+		//straight back at 2*36*N^2, which is what phase 3 exists to avoid. A
+		//later GPU solve just flattens from InteractMatrix again, as it did
+		//before the hand-off existed.
+		delete[] mAsmMatrix; mAsmMatrix = NULL;
+		return 1;
+	}
+#endif
+
+	//No matrix in either representation: an interaction that was never set up,
+	//an MPI worker rank (which holds no matrix by design), or a dump that
+	//carried none.
+	Send.ErrorMessage("Radia::Error118");
+	return 0;
 }
 
 //-------------------------------------------------------------------------
@@ -680,7 +753,17 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 			{
 				if(radGPU_AssembleMatrix(&polyData, &recData, &symData, &quadData, &result) == 0)
 				{
-					radGPU_UnpackMatrix(&result, this);
+					//Keep the assembly's output as it is instead of unpacking it
+					//into InteractMatrix. It is already the layout the GPU solver
+					//wants, and that unpack was a SECOND full host copy of the
+					//36*N^2 matrix -- the thing that made peak host memory
+					//2*36*N^2 and put the 44k-element model out of reach.
+					//Consumers needing radia's TMatrix3df form get it from
+					//EnsureInteractMatrix(), which converts on demand and
+					//releases this buffer.
+					if(mAsmMatrix != NULL) delete[] mAsmMatrix;
+					mAsmMatrix = result.matrix_blocks;
+					result.matrix_blocks = NULL; //ownership moved out of result
 					radGPU_FreeAsmData(&polyData, &recData, &result);
 					radGPU_FreeSymData(&symData);
 					radGPU_FreeObsQuadData(&quadData);
@@ -721,6 +804,13 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 		//consistently on all ranks.
 	}
 #endif
+
+	//RadiaCUDA: the GPU did not take the matrix, so the host array the CPU
+	//assembly writes into has to exist -- it is no longer allocated up front in
+	//AllocateMemory (it would have been dead weight on every GPU-assembled
+	//solve). Master only, mirroring IntrctMatrMemAllocShouldBeDone in Setup:
+	//MPI workers compute blocks and send them, they never hold the matrix.
+	if((m_rankMPI <= 0) && (!AllocateInteractMatrix())) return 0;
 
 	//RadiaCUDA: OPT-IN Galerkin (volume-averaged) assembly. Prepared once here
 	//so both CPU loops below can use it; with the flag off nothing is built and
@@ -1655,6 +1745,9 @@ void radTInteraction::DumpBin(CAuxBinStrVect& oStr, vector<int>& vElemKeysOut, m
 
 	//TMatrix3df** InteractMatrix; //OC250504
 	////TMatrix3d** InteractMatrix; //OC250504
+	//RadiaCUDA: materialize it first if the matrix is still in the GPU
+	//assembly's layout, so a dump does not silently come out without one.
+	EnsureInteractMatrix();
 	if(InteractMatrix != NULL)
 	{
 		oStr << (char)1;
@@ -1854,6 +1947,14 @@ radTInteraction::radTInteraction(CAuxBinStrVect& inStr, map<int, int>& mKeysOldN
 {
 	//radIdentTrans* IdentTransPtr; //required
 	IdentTransPtr = new radIdentTrans();
+
+	//Every other array below is zeroed before its conditional load; this one
+	//was not, so a stream that carries no matrix (the "(char)0" case in
+	//DumpBin) left it holding garbage for DeallocateMemory to delete.
+	InteractMatrix = NULL;
+#ifdef RADIA_WITH_CUDA
+	mAsmMatrix = NULL;
+#endif
 
 	//int AmOfMainElem;
 	inStr >> AmOfMainElem;

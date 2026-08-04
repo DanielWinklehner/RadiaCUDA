@@ -166,10 +166,9 @@ int radGPU_AssembleMatrix(
     RadGPU_ObsQuadData* quadData,
     RadGPU_AsmResult* result);
 
-// Unpack GPU matrix into Radia's TMatrix3df format
-void radGPU_UnpackMatrix(
-    RadGPU_AsmResult* result,
-    class radTInteraction* intrct);
+// (No unpack step: the caller keeps result->matrix_blocks as-is -- it is
+// already the solver's layout. radTInteraction::EnsureInteractMatrix converts
+// it to TMatrix3df form on demand for the CPU-side consumers.)
 
 // Free all GPU assembly data
 void radGPU_FreeAsmData(

@@ -1,4 +1,4 @@
-# Assembly -> solve hand-off: state, measurements, and the remaining phase
+# Assembly -> solve hand-off: state and measurements
 
 Working note for picking this up in a fresh session. Everything below was
 measured on an **RTX 4070 Ti SUPER (16376 MiB, CC 8.9, PCIe 4.0 x16)** with
@@ -18,13 +18,27 @@ Two separate limits follow:
 * **VRAM** capped model size at ~17.5k elements with a desktop running
   (13.4 GiB free of 16). Addressed by `UtiGpuFallback('gpu_streaming')`, which
   keeps rows resident and streams only the overflow. **Done.**
-* **Host RAM** now binds instead, because *two* full host copies of the matrix
-  exist at once (`InteractMatrix` as `TMatrix3df**`, plus the assembly's flat
-  buffer). Peak is therefore `2 * 36*N^2`. **This is what phase 3 fixes.**
+* **Host RAM** bound next, because *two* full host copies of the matrix existed
+  at once (`InteractMatrix` as `TMatrix3df**`, plus the assembly's flat
+  buffer), so peak was `2 * 36*N^2`. **Fixed by phase 3.**
 
-Concretely: the 44k all-tet 60 MeV model has a 69.7 GB matrix and currently
-needs **~139 GB** of host RAM against ~94 GB free. **It does not fit today.**
-At one representation it needs 69.7 GB and fits comfortably.
+Concretely: the 44k all-tet 60 MeV model has a 69.7 GB matrix and needed
+**~139 GB** of host RAM against ~94 GB free — it did not fit. At one
+representation it needs 69.7 GB and fits.
+
+Measured, 19683 elements (13.95 GB matrix), assembly + solve, peak process
+commit above baseline, `UtiGpuFallback('gpu_streaming')`:
+
+| | before | after |
+|---|---|---|
+| after `RlxPre` | 2.88 x matrix | 1.88 x |
+| after `RlxAuto` | 3.03 x | 2.04 x |
+
+Exactly one `36*N^2` host copy removed. The ~1 x that remains beyond the matrix
+itself is **not** a host copy: on Windows/WDDM a device allocation carries a
+same-size system-memory backing store in the process's commit charge, so it is
+bounded by VRAM (~13-15 GB here) and does **not** grow with N. For the 44k
+model that puts the requirement at ~70 GB + ~13 GB rather than ~139 GB + ~13 GB.
 
 ---
 
@@ -37,6 +51,7 @@ At one representation it needs 69.7 GB and fits comfortably.
 | `85228e9` | opt-in Galerkin assembly (+ `AmOfWarnings` 15->16 fix) |
 | `cecf9b2` | **phase 1** — assembly emits the solver's layout directly |
 | `00e123d` | **phase 2** — device hand-off; cold solves ~8x faster |
+| (this) | **phase 3** — one host representation at a time; peak `36*N^2` |
 
 ### Phase 1 (done)
 The assembly kernel writes **scalar row-major** (`[N3 x N3]`, `N3 = 3N`) instead
@@ -78,86 +93,124 @@ resident then); the staged buffer is released on every error path.
 
 ---
 
-## 3. Phase 3 — the remaining work
+## 3. Phase 3 (done)
 
-**Goal:** stop materializing `InteractMatrix` when the GPU assembled the matrix
-and the GPU will solve, so peak host memory drops from `2*36N^2` to `36N^2`.
+**Goal:** stop materializing `InteractMatrix` when the GPU assembled the matrix,
+so peak host memory drops from `2*36N^2` to `36N^2`.
 
-The saving comes from **not allocating**, not merely not filling.
+### 3.1 What it does
 
-### 3.1 Every consumer of `InteractMatrix`
+The interaction now keeps the assembly's own output —
+`radTInteraction::mAsmMatrix`, scalar row-major `float[N3 x N3]`, the layout the
+matvec wants — instead of unpacking it into `InteractMatrix`. The invariant is
+**one host representation at a time**:
 
-| site | when it runs | note |
-|---|---|---|
-| `radrlmet.cpp` — 22 direct uses | CPU relaxation only | all reachable **only** via §3.2 |
-| `radgpurlx.cpp:41` (flatten) | GPU solve, `skipMatrix == 0` only | after phase 2 this is now rare |
-| `radgpurlx.cpp:218` (self blocks) | **EVERY GPU solve** | see §3.3 — the trap |
-| `radintrc.h:516` `ShowInteractMatrix` | on request | via `radapl2.cpp:1193` |
-| `radintrc.cpp:377-426` | allocation | see §3.4 |
+* GPU assembled → `mAsmMatrix` holds it, `InteractMatrix` is null.
+* CPU assembled → `InteractMatrix` holds it, `mAsmMatrix` is null.
+* `EnsureInteractMatrix()` converts the first into the second on demand and
+  **frees `mAsmMatrix`**, so the CPU-solve path never holds both (that would put
+  peak straight back at `2*36N^2`).
 
-### 3.2 The chokepoints (verified)
+A GPU solve with `skipMatrix == 0` **borrows** `mAsmMatrix` as `h_matrix`
+(`RadGPURelaxData::h_matrixOwned == 0`) — no allocation and no O(N^2) flatten,
+which also removes the second copy that used to appear during the solve.
 
-Every relaxation-method object in the codebase is constructed in exactly two
-functions, both in `radapl2.cpp`:
+Deliberately *not* done: filling from the device cache, as §3.5 of the original
+plan suggested. The device cache is volatile — solving a different interaction
+`cudaFree`s it (`radgpurlx.cu`, cache-miss branch) — so an interaction whose only
+copy lived there would silently lose its matrix. The host buffer is the durable
+representation; the device cache stays a pure accelerator. No getter needed.
 
-* `radTApplication::MakeManualRelax` (`:1220`) — builds `radTSimpleRelaxation`
-* `radTApplication::MakeAutoRelax`   (`:1289`) — builds `radTRelaxationMethNo_3/4/a5/8/...`
+### 3.2 The chokepoints
 
-Verified by grepping for every `RelaxMethNo_*` / `radTSimpleRelaxation`
-construction outside `radrlmet.cpp` — there are none elsewhere. So guarding
-these two, plus `ShowInteractMatrix` and the flatten path, covers all 22
-downstream uses **without touching Chubar's `radrlmet.cpp` at all**.
+**The original claim in this section was wrong** — it said every relaxation
+method is constructed in `MakeManualRelax` / `MakeAutoRelax`, so `radrlmet.cpp`
+need not be touched. Re-grepping found two more construction sites *inside*
+`radrlmet.cpp`: `radTRelaxationMethNo_6::AutoRelax` (`:1648`) and
+`radTRelaxationMethNo_7::FillInSubMatrixArrays` (`:1933`), both on interactions
+those methods build themselves (reachable from Python as `Solve(..., meth=6|7)`),
+and `MethNo_7` also reads `InteractMatrix` directly in four of its members.
 
-That makes it ~4 guard sites, not 22. Re-verify this grep before relying on it.
+So the guard went into the **common base constructor**,
+`radTIterativeRelaxMeth(radTInteraction*)` in `radrlmet.h` — one line that covers
+every method, present and future, including the internally-constructed ones.
+Plus, so nothing depends on statement order inside those two methods,
+`EnsureInteractMatrix()` right where they create their interactions.
 
-### 3.3 The trap: self-blocks run on every solve
+`radapl2.cpp` still calls it at the user-facing entry points, for the error
+*path* rather than for coverage: a failure there returns `Radia::Error118`
+cleanly instead of crashing inside a constructor. Methods 9/10/11 call it only
+in the branches that actually leave the GPU.
+
+Also guarded: `ShowInteractMatrix` (`radintrc.h`) and `DumpBin`
+(`radintrc.cpp`) — without the latter a dump would silently come out without a
+matrix.
+
+### 3.3 The trap: self-blocks run on every solve (fixed first)
 
 `radGPU_PackInteractionData` reads `InteractMatrix[i][i]` for the
-self-interaction diagonal (`radgpurlx.cpp:218`) **outside** the `skipMatrix`
-guard, so it runs on every GPU solve. If that triggers materialization, phase 3
-buys *nothing* — every solve would rebuild the whole host matrix.
-
-Fix first: pull the N diagonal blocks from the device matrix (9N floats, O(N)).
-This is a prerequisite, not an optional extra.
+self-interaction diagonal **outside** the `skipMatrix` guard, so it runs on every
+GPU solve; had it triggered materialization, phase 3 would have bought nothing.
+It now reads the 9 floats per element from whichever representation exists —
+`mAsmMatrix` when the GPU assembled. Still O(N), and no device round trip.
 
 ### 3.4 Deferred allocation
 
-`InteractMatrix` is allocated in `AllocateMemory` (`radintrc.cpp:377-426`)
-*before* it is known whether GPU assembly will succeed, and the CPU fallback
-assembly writes straight into it. The allocation must move to after the GPU has
-either taken the matrix or declined. This is the riskiest edit in phase 3 —
-it changes interaction-object lifetime.
+`AllocateMemory` no longer allocates `InteractMatrix`; that moved to
+`AllocateInteractMatrix()`, called from `SetupInteractMatrix` immediately before
+the CPU assembly (master rank only, mirroring `IntrctMatrMemAllocShouldBeDone`)
+and from `EnsureInteractMatrix()`.
 
-### 3.5 Suggested shape
-
-```
-radTInteraction::EnsureInteractMatrix()   // alloc if needed + fill from the
-                                          // device cache (D2H, layout read as
-                                          // in the current radGPU_UnpackMatrix)
-```
-called at the four chokepoints. Needs a getter from `radgpurlx.cu` exposing the
-cached device pointer/stamp/dim.
+Two latent bugs in the moved code, fixed in passing: the row-by-row failure path
+freed `InteractMatrix[i]` in a loop over `k` (should be `[k]`), and the
+contiguous allocation computed `AmOfMainElem*AmOfMainElem` in `int` — overflow
+above ~46k elements, inside the range this work is aimed at. Separately, the
+binary-parse constructor never initialized `InteractMatrix`, so a stream
+carrying no matrix left it holding garbage for `DeallocateMemory` to delete.
 
 ---
 
 ## 4. Verification
 
-**Non-negotiable:** bit-identity against the previous build. See
-`fingerprint`-style harness (scratch; reproduce it):
+**Non-negotiable:** bit-identity against the previous build. The harness is no
+longer scratch — it is `studies/fingerprint.py`:
 
-* four cases — plain, **rotated**, mirrored, rotated+mirrored
-* full precision (`%.17e`) B at several points, plus misfit and iteration count
-* build reference, `git stash` the change, rebuild, diff
+* four geometry cases — plain, **rotated**, mirrored, rotated+mirrored
+* each solved four ways — `m4` (CPU), `m9` (GPU Jacobi), `m11` (GPU NK),
+  `man` (`RlxMan`) — so the assembly's output is checked through every route
+  it reaches a solver by
+* full precision (`%.17e`) B at three points, plus misfit and iteration count
+* build reference, run, `git stash` the change, rebuild, run, diff — must be
+  empty. Self-reproducible run to run (`FldLenRndSw('off')`, CPU field eval).
+
+Phase 3 is bit-identical across all 16 cases.
 
 **The rotated case is the one that matters.** It is the only one with a
 non-identity `MainTransPtrArray`, so it is the only one that exercises the row
 transform at all. With a plain block that code path never runs.
 
-**Gap to close in phase 3:** nothing currently exercises **GPU-assembled ->
-CPU-solved**, which is exactly the path phase 3 can break (null `InteractMatrix`).
-Reachable via `rad.UtiGpuFallback('cpu')` on an oversized model, or the
-anisotropic-material (Warning022) / staged-relaxation (Warning023) fallbacks.
-Write that test *before* the phase-3 edits.
+**Gap closed:** `tests/test_gpu_asm_cpu_solve.py` covers **GPU-assembled ->
+CPU-solved**, the path phase 3 could break (null `InteractMatrix`), written
+before the phase-3 edits and passing on both builds. Routes used:
+
+* anisotropic linear material (`KsiPar != KsiPerp`, Warning022) — the sharp one:
+  the GPU solver hands off to CPU method 10, so methods 9 and 11 must reproduce
+  an explicit method-10 call **bit for bit**;
+* `RlxMan` on a GPU-assembled matrix; CPU solve then GPU solve on one
+  interaction; a repeated GPU solve (warm device cache — the self-blocks path);
+* the assembly declining: `RlxPre(use_gpu=False)`, and an extruded polygon
+  (Warning020, no GPU kernel — the same fall-through an oversized model takes,
+  without its O(N^2) CPU assembly);
+* a genuinely VRAM-oversized model under `UtiGpuFallback('cpu')` — the literal
+  case, opt-in via `RADIA_TEST_OVERSIZED=1` (~12 GB host RAM, ~4 min).
+
+Staged relaxation (Warning023) is *not* reachable from Python — `FldCmpMeth` is
+only set by `FieldCompMethForSubdividedRecMag`, which has no binding.
+
+**Known flake, unrelated:** `tests/test_sliver_tet_asm.py` crashes ~50% of runs
+with heap corruption (`0xC0000374`) *after* all its checks have passed and
+printed. Pre-existing — measured 5/10 on `fc4cdb6` and reproducible with no
+interaction matrix at all, from `ObjPolyhdr`'s non-convex rejection path alone.
 
 ### Lesson worth not relearning
 Phase 1's first attempt differed from the host in the last ~2 digits (~1e-15

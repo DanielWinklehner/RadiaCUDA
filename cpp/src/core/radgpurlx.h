@@ -30,6 +30,11 @@ struct RadGPURelaxData {
     // Interaction matrix flattened to row-major float[matrixDim x matrixDim]
     // (null when the device cache holds this stamp already)
     float* h_matrix;
+    // 1 when the pack allocated h_matrix and radGPU_FreeData must release it;
+    // 0 when it is BORROWED from the interaction object -- the GPU assembly's
+    // own output is already in exactly this layout, so the pack points at it
+    // rather than making a second host copy of the 36*N^2 matrix.
+    int h_matrixOwned;
 
     // Working arrays (double)
     double* h_magn;        // [matrixDim] current magnetization

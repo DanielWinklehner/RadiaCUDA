@@ -1606,6 +1606,9 @@ void radTRelaxationMethNo_6::SetupInteractionMatrices(const radThg& hg, const ra
 			delete[] IntrctPtr; IntrctPtr = NULL;
             Send.ErrorMessage("Radia::Error116"); throw 0;
 		}
+		//RadiaCUDA: this method relaxes the parts through InteractMatrix, which
+		//the GPU assembly leaves unmaterialized (ASM_SOLVE_HANDOFF.md phase 3).
+		tIntrct->EnsureInteractMatrix();
 
 		radThg hgGroup(GroupPtr->CreateGroupIncludingAllMembersExceptIt(iter));
 		mMapOfPartHandlers[LocMapCount++] = hgGroup;
@@ -1717,6 +1720,9 @@ void radTRelaxationMethNo_7::SetupMainInteractionData(const radThg& hg, const ra
 	{
         delete IntrctPtr; IntrctPtr = NULL;
 	}
+	//RadiaCUDA: several members below read IntrctPtr->InteractMatrix directly,
+	//and the GPU assembly leaves it unmaterialized (ASM_SOLVE_HANDOFF.md phase 3).
+	else IntrctPtr->EnsureInteractMatrix();
 }
 
 //-------------------------------------------------------------------------

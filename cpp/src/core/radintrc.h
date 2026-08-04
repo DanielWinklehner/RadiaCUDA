@@ -93,7 +93,6 @@ class radTInteraction : public radTg {
 	friend int radGPU_AutoRelaxNK(radTInteraction*, double, int, char, double);
 	friend int radGPU_PackGeometryForAsm(radTInteraction*, struct RadGPU_PolyData*, struct RadGPU_RecMagData*, struct RadGPU_SymData*, struct RadGPU_ObsQuadData*);
 	friend int radGPU_PackObsQuadForAsm(radTInteraction*, struct RadGPU_ObsQuadData*);
-	friend void radGPU_UnpackMatrix(struct RadGPU_AsmResult*, radTInteraction*);
 
 public:
 	// Unique identity of THIS interaction matrix (assigned once per Setup);
@@ -101,6 +100,19 @@ public:
 	// same matrix skip the flatten + device upload. 0 = not set up.
 	unsigned long long mGpuMatrixStamp = 0;
 private:
+	// The GPU assembly's output, kept AS PRODUCED: scalar row-major
+	// float[N3 x N3], N3 = 3*AmOfMainElem -- which is exactly the layout the
+	// GPU solver's matvec wants. Owned; null when the matrix was assembled on
+	// the CPU or has since been converted to InteractMatrix.
+	//
+	// This and InteractMatrix are two representations of the SAME matrix, each
+	// 36*N^2 bytes, and at most one of them is alive at a time. Materializing
+	// both is what used to make peak host memory 2*36*N^2 and put the 44k-element
+	// model out of reach on a 128 GB machine. EnsureInteractMatrix() converts
+	// this one into InteractMatrix on demand, for the consumers that need
+	// radia's TMatrix3df form (the CPU relaxations, ShowInteractMatrix,
+	// DumpBin), and releases it.
+	float* mAsmMatrix;
 #endif
 
 	int AmOfMainElem;
@@ -194,6 +206,18 @@ public:
 	void CountMainRelaxElems(radTg3d*, radTlphgPtr*);
 	void AllocateMemory(char ExtraExternFieldArrayIsNeeded);
 	void DeallocateMemory(); //OC27122019
+
+	//RadiaCUDA: allocation of InteractMatrix, split out of AllocateMemory
+	//because it can no longer happen there -- at that point it is not yet known
+	//whether the GPU will take the matrix, and if it does, this 36*N^2 host
+	//array is never needed. Returns 0 (having reported the error) on failure;
+	//a no-op if the matrix is already allocated.
+	int AllocateInteractMatrix();
+	//RadiaCUDA: make sure InteractMatrix exists, converting from the GPU
+	//assembly's buffer if that is where the matrix currently lives. Call before
+	//any use of InteractMatrix that can follow a GPU assembly. Returns 0 on
+	//failure (out of memory, or no matrix in either representation).
+	int EnsureInteractMatrix();
 
 	int SetupInteractMatrix(); //OC26122019
 	//void SetupInteractMatrix();
@@ -513,6 +537,7 @@ inline void radTInteraction::ShowInteractVector(char Ch)
 
 inline void radTInteraction::ShowInteractMatrix()
 {
+	if(!EnsureInteractMatrix()) return; //RadiaCUDA: may live as mAsmMatrix
 	Send.MatrixOfMatrix3d(InteractMatrix, AmOfMainElem, AmOfMainElem);
 }
 

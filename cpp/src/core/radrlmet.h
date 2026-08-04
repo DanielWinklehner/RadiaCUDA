@@ -29,7 +29,17 @@ protected:
 	radTInteraction* IntrctPtr;
 
 public:
-	radTIterativeRelaxMeth(radTInteraction* InIntrctPtr) { IntrctPtr = InIntrctPtr;}
+	radTIterativeRelaxMeth(radTInteraction* InIntrctPtr)
+	{
+		IntrctPtr = InIntrctPtr;
+		//RadiaCUDA: every relaxation method below reads
+		//IntrctPtr->InteractMatrix directly, and it is materialized lazily when
+		//the GPU assembled the matrix (studies/ASM_SOLVE_HANDOFF.md phase 3).
+		//Asking for it here covers all of them at once -- including the ones
+		//methods 6 and 7 construct on their own internal interactions, which
+		//the entry points in radapl2.cpp cannot reach.
+		if(IntrctPtr != 0) IntrctPtr->EnsureInteractMatrix();
+	}
 	radTIterativeRelaxMeth() { IntrctPtr = 0;}
 
 	virtual void DefineNewMagnetizations() {}
