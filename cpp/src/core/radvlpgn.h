@@ -98,6 +98,12 @@ public:
 		: radTg3dRelax(InMagn, InM_LinCoef)
 	{
 		AmOfFaces = lenArrayOfFaces; SomethingIsWrong = 0;
+		//Init these before any step that can set SomethingIsWrong: on the early
+		//return below the object is still destroyed, and ~radTPolyhedron deletes
+		//pJ_LinCoef (an indeterminate pointer otherwise).
+		pJ_LinCoef = 0; mLinTreat = 0;
+		J.Zero(); J_IsNotZero = false;
+
 		//DefineCentrPoint(ArrayOfPoints, lenArrayOfPoints); //OC090908
 		ShiftFacesNumeration(ArrayOfFaces, ArrayOfLengths);
 		FillInVectHandlePgnAndTrans(ArrayOfPoints, lenArrayOfPoints, ArrayOfFaces, ArrayOfLengths);
