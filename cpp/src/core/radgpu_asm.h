@@ -34,6 +34,12 @@ struct RadGPU_PolyData {
                             // centroids in the collocation (default) case.
                             // Kept because it documents/defines the frame.
     int* face_offsets;      // [n_elem + 1] CSR into face arrays (empty range for RecMags)
+    double* row_trans;      // [9 * n_elem] row-major 3x3 = s*M_inv of
+                            // MainTransPtrArray[i] (identity where the element
+                            // has no base transform). The CPU assembly finalizes
+                            // each block with TrMatrix_inv (radintrc.cpp:634);
+                            // the kernel now applies it at store time instead of
+                            // the host doing it on unpack.
 
     // Per-face
     int* edge_offsets;      // [n_faces_total + 1] CSR into edge arrays
@@ -123,7 +129,14 @@ struct RadGPU_ObsQuadData {
 // ============================================================
 struct RadGPU_AsmResult {
     int N;                  // number of elements
-    float* matrix_blocks;   // [N * N * 9] row-major 3x3 blocks, row-major within each block
+    // [N3 * N3] SCALAR row-major (N3 = 3N) -- the layout the solver's matvec
+    // wants, produced directly by the kernel. It used to be [N*N*9] block-major,
+    // which the host then converted twice (here into TMatrix3df, and again in
+    // radGPU_PackInteractionData back into scalar row-major); both O(N^2) passes
+    // dominated a cold solve. Block-major is right for the assembly's stores and
+    // scalar row-major for the matvec's coalesced row reads, so a conversion is
+    // inherent -- it just belongs on the device, at 575 GB/s, not on the host.
+    float* matrix_blocks;
 };
 
 // ============================================================

@@ -242,6 +242,23 @@ int radGPU_PackGeometryForAsm(
         obsCenters[3*i+2] = cp.z;
     }
 
+    // --- Per-row finalizing transform: s*M_inv of MainTransPtrArray[i] -------
+    // Extracted through the public virtual by transforming the identity:
+    // TrMatrix_inv(I) == s*M_inv*I == s*M_inv exactly (the products are with
+    // 1.0 and 0.0), and radIdentTrans overrides it to a no-op, so rows with no
+    // base transform come back as the identity. Going through the virtual also
+    // keeps composite transforms correct without touching radTrans internals.
+    double* rowTrans = new double[9 * N];
+    for(int i = 0; i < N; i++) {
+        TMatrix3d m(TVector3d(1., 0., 0.), TVector3d(0., 1., 0.), TVector3d(0., 0., 1.));
+        radTrans* tr = intrct->MainTransPtrArray[i];
+        if(tr != 0) tr->TrMatrix_inv(m);
+        double* d = rowTrans + 9*i;
+        d[0] = m.Str0.x; d[1] = m.Str0.y; d[2] = m.Str0.z;
+        d[3] = m.Str1.x; d[4] = m.Str1.y; d[5] = m.Str1.z;
+        d[6] = m.Str2.x; d[7] = m.Str2.y; d[8] = m.Str2.z;
+    }
+
     // --- RecMag packing (global element indexing; zeros where not a RecMag) ---
     memset(recData, 0, sizeof(RadGPU_RecMagData));
     recData->n_rec = nRec;
@@ -285,6 +302,7 @@ int radGPU_PackGeometryForAsm(
         polyData->n_faces_total = totalFaces;
         polyData->n_edges_total = totalEdges;
         polyData->centers = obsCenters;  // use transformed obs centers
+        polyData->row_trans = rowTrans;  // s*M_inv per row element
         polyData->face_offsets = new int[N + 1];
         polyData->edge_offsets = new int[totalFaces + 1];
         polyData->face_cz = new double[totalFaces];
@@ -438,47 +456,26 @@ void radGPU_UnpackMatrix(
         return;
     }
 
-    // Backstop: never let a non-finite entry reach the solver. The kernel now
-    // guards the degenerate-element math that produced these (radgpu_asm.cu,
-    // radgpu_asm_log_R_plus_u), but a single NaN slipping into InteractMatrix
-    // is silent here and only surfaces much later as an unattributable
-    // "radGPU_RelaxNK: non-finite residual at start" -> CPU fallback. Zero it,
-    // report once with the offending element pair, so the cause is visible.
-    long long nBadEntries = 0;
-    int firstBadI = -1, firstBadJ = -1;
-
-    float* blocks = result->matrix_blocks;
+    // Pure layout read now: matrix_blocks arrives in the solver's SCALAR
+    // row-major layout with the row transform (MainTransPtrArray[i]->
+    // TrMatrix_inv) and the non-finite backstop ALREADY applied by the kernel
+    // (store_block_rowmajor in radgpu_asm.cu), which also reports the scrub.
+    // Doing both there is what lets the GPU->solver hand-off skip the host
+    // entirely; this function survives only for consumers that genuinely need
+    // radia's TMatrix3df form -- CPU relaxation, ShowInteractMatrix.
+    const int N3 = 3 * N;
+    const float* mat = result->matrix_blocks;
     for(int i = 0; i < N; i++) {
-        // Observation-row element's first-copy transform. The CPU assembly finalizes
-        // each block with MainTransPtrArray[StrNo]->TrMatrix_inv (radintrc.cpp:575);
-        // the GPU kernel omits it, so apply it here on unpack. For rows whose element
-        // has no base transform MainTransPtrArray[i] is the identity and this is a
-        // no-op (the common case: pure TrfZerPara/Perp symmetry). Issue #6.
-        radTrans* rowTrans = intrct->MainTransPtrArray[i];
+        const float* r0 = mat + (long long)(3*i + 0) * N3;
+        const float* r1 = mat + (long long)(3*i + 1) * N3;
+        const float* r2 = mat + (long long)(3*i + 2) * N3;
         for(int j = 0; j < N; j++) {
-            long long idx = ((long long)i * N + j) * 9;
-            for(int k = 0; k < 9; k++) {
-                if(!std::isfinite(blocks[idx+k])) {
-                    blocks[idx+k] = 0.f;
-                    if(nBadEntries++ == 0) { firstBadI = i; firstBadJ = j; }
-                }
-            }
-            TMatrix3d block(
-                TVector3d(blocks[idx+0], blocks[idx+1], blocks[idx+2]),
-                TVector3d(blocks[idx+3], blocks[idx+4], blocks[idx+5]),
-                TVector3d(blocks[idx+6], blocks[idx+7], blocks[idx+8]));
-            if(rowTrans != 0) rowTrans->TrMatrix_inv(block);
-            intrct->InteractMatrix[i][j] = block;
+            int c = 3 * j;
+            intrct->InteractMatrix[i][j] = TMatrix3d(
+                TVector3d(r0[c], r0[c+1], r0[c+2]),
+                TVector3d(r1[c], r1[c+1], r1[c+2]),
+                TVector3d(r2[c], r2[c+1], r2[c+2]));
         }
-    }
-
-    if(nBadEntries > 0) {
-        fprintf(stderr,
-            "GPU asm unpack: %lld non-finite interaction-matrix entries zeroed "
-            "(first at element pair %d,%d of %d). This indicates a degenerate "
-            "(sliver) element; check the mesh quality of those elements -- the "
-            "solve will proceed but the result near them is unreliable.\n",
-            nBadEntries, firstBadI, firstBadJ, N);
     }
 }
 

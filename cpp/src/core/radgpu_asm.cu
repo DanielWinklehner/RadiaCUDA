@@ -26,6 +26,60 @@
 extern "C" int RadGetGpuFallbackMode();
 
 // ============================================================
+// Finalize one 3x3 block straight into the solver's SCALAR row-major layout.
+//
+// This reproduces the host unpack (radgpu_asm.cpp) STEP FOR STEP so the result
+// is bit-identical, which is the whole safety argument for moving it here:
+//   1. round to float -- the block used to reach the host through a float
+//      staging buffer, so the rounding happened there and must still happen;
+//   2. scrub non-finite entries to 0, BEFORE the transform, as the host did;
+//   3. apply the row element's s*M_inv in double, in the exact summation order
+//      of operator*(TMatrix3d, TMatrix3d) (gmvect.h:413);
+//   4. round to float on store.
+// A row with no base transform gets the identity, and multiplying by it is
+// exact (products with 1.0 and 0.0, sums of a value and zero), so those rows
+// match the host's "skip the multiply entirely" path exactly.
+// ============================================================
+__device__ __forceinline__ void store_block_rowmajor(
+    const double* acc,
+    const double* __restrict__ row_trans,
+    int obs_idx, int row_begin, int src_idx, int N, int N3,
+    unsigned long long* bad_count, int* bad_first,
+    float* __restrict__ out)
+{
+    float bf[9];
+    for(int k = 0; k < 9; k++) bf[k] = (float)acc[k];
+    for(int k = 0; k < 9; k++) {
+        if(!isfinite(bf[k])) {
+            bf[k] = 0.f;
+            atomicAdd(bad_count, 1ull);
+            atomicMin(bad_first, obs_idx * N + src_idx);   // lowest pair, deterministic
+        }
+    }
+    double b[9];
+    for(int k = 0; k < 9; k++) b[k] = (double)bf[k];
+
+    const double* T = row_trans + 9 * obs_idx;
+    int r0 = 3 * (obs_idx - row_begin);
+    int c0 = 3 * src_idx;
+    for(int a = 0; a < 3; a++) {
+        for(int c = 0; c < 3; c++) {
+            // Intrinsics, not `x*y + z`: nvcc contracts that into FMA, which
+            // rounds once instead of twice and so does NOT reproduce the host's
+            // separate multiply/add. Measured -- with plain `*`/`+` the rotated
+            // -element case differed from the old host unpack in the last ~2
+            // digits (~1e-15 relative), while identity-transform rows matched
+            // exactly. __dmul_rn/__dadd_rn are non-contractible and reproduce
+            // operator*(TMatrix3d,TMatrix3d) (gmvect.h:413) bit for bit.
+            double v = __dadd_rn(__dadd_rn(__dmul_rn(T[3*a+0], b[0*3+c]),
+                                           __dmul_rn(T[3*a+1], b[1*3+c])),
+                                 __dmul_rn(T[3*a+2], b[2*3+c]));
+            out[(long long)(r0 + a) * N3 + c0 + c] = (float)v;
+        }
+    }
+}
+
+// ============================================================
 // Device helper: TransAtans (matches Radia's CPU version)
 // ============================================================
 __device__ double TransAtans_dev(double x, double y, double& PiMult)
@@ -675,6 +729,10 @@ __global__ void assemble_mixed_kernel(
     const double* __restrict__ sym_point_tr,
     const double* __restrict__ sym_field_tr,
 
+    const double* __restrict__ row_trans,
+    int N3,
+    unsigned long long* bad_count,
+    int* bad_first,
     int row_begin,                              // first matrix row in this tile
     int n_rows,                                 // rows in this tile (N = whole matrix)
     float* __restrict__ out_blocks              // [n_rows*N*9], TILE-local
@@ -706,10 +764,9 @@ __global__ void assemble_mixed_kernel(
         for(int k = 0; k < 9; k++) acc[k] += wq * block[k];
     }
 
-    // Store result
-    long long outIdx = tid * 9;
-    for(int k = 0; k < 9; k++)
-        out_blocks[outIdx + k] = (float)acc[k];
+    // Store result (scalar row-major, transformed + scrubbed)
+    store_block_rowmajor(acc, row_trans, obs_idx, row_begin, src_idx,
+                         N, N3, bad_count, bad_first, out_blocks);
 }
 
 // ============================================================
@@ -747,6 +804,10 @@ __global__ void assemble_near_kernel(
     const double* __restrict__ sym_point_tr,
     const double* __restrict__ sym_field_tr,
 
+    const double* __restrict__ row_trans,
+    int N3,
+    unsigned long long* bad_count,
+    int* bad_first,
     int row_begin,
     int n_rows,
     float* __restrict__ out_blocks
@@ -775,9 +836,8 @@ __global__ void assemble_near_kernel(
         for(int k = 0; k < 9; k++) acc[k] += wq * block[k];
     }
 
-    long long outIdx = ((long long)(obs_idx - row_begin) * N + src_idx) * 9;
-    for(int k = 0; k < 9; k++)
-        out_blocks[outIdx + k] = (float)acc[k];
+    store_block_rowmajor(acc, row_trans, obs_idx, row_begin, src_idx,
+                         N, N3, bad_count, bad_first, out_blocks);
 }
 
 // ============================================================
@@ -813,6 +873,7 @@ int radGPU_AssembleMatrix(
     int N = polyData->n_elem;  // total elements (poly + RecMag; see packing)
 
     long long totalPairs = (long long)N * N;
+    int N3 = 3 * N;       // matrix dimension in the solver's scalar layout
     int streamRows = 0;   // set by the pre-flight under UtiGpuFallback('gpu_streaming')
 
     // Pre-flight VRAM check (issue #13): the dense interaction matrix on the device
@@ -866,6 +927,9 @@ int radGPU_AssembleMatrix(
         int *d_is_rec=nullptr;
         double *d_rec_centers=nullptr, *d_rec_dims=nullptr;
         float *d_out=nullptr;
+        double *d_row_trans=nullptr;
+        unsigned long long *d_bad_count=nullptr;
+        int *d_bad_first=nullptr;
         int *d_sym_counts=nullptr, *d_sym_offsets=nullptr;
         double *d_sym_pt=nullptr, *d_sym_ft=nullptr;
         // Observation quadrature: base pass (always) and Galerkin near pass.
@@ -927,6 +991,9 @@ int radGPU_AssembleMatrix(
         }
         tilePairs = (long long)(streamRows ? rowsPerTile : N) * N;
         CU_MALLOC(d_out,          tilePairs*9*sizeof(float));
+        CU_MALLOC(d_row_trans,    9*(size_t)N*sizeof(double));
+        CU_MALLOC(d_bad_count,    sizeof(unsigned long long));
+        CU_MALLOC(d_bad_first,    sizeof(int));
         CU_MALLOC(d_sym_counts,   (size_t)N*sizeof(int));
         CU_MALLOC(d_sym_offsets,  ((size_t)N+1)*sizeof(int));
         CU_MALLOC(d_sym_pt,       (size_t)totalCopies*9*sizeof(double));
@@ -959,6 +1026,10 @@ int radGPU_AssembleMatrix(
         CU_TRY(cudaMemcpy(d_sym_offsets,  symData->sym_offsets,       ((size_t)N+1)*sizeof(int),            cudaMemcpyHostToDevice));
         CU_TRY(cudaMemcpy(d_sym_pt,       symData->point_transforms,  (size_t)totalCopies*9*sizeof(double), cudaMemcpyHostToDevice));
         CU_TRY(cudaMemcpy(d_sym_ft,       symData->field_transforms,  (size_t)totalCopies*9*sizeof(double), cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_row_trans,    polyData->row_trans,        9*(size_t)N*sizeof(double), cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemset(d_bad_count, 0, sizeof(unsigned long long)));
+        {   int initFirst = 0x7fffffff;
+            CU_TRY(cudaMemcpy(d_bad_first, &initFirst, sizeof(int), cudaMemcpyHostToDevice)); }
 
         // One pass when the matrix fits, otherwise row block by row block into
         // the same host buffer. Identical arithmetic either way: a given (row,
@@ -977,6 +1048,7 @@ int radGPU_AssembleMatrix(
                 recData->abs_rand, recData->rel_rand, recData->zero_rand,
                 recData->act_on_doubles,
                 d_sym_counts, d_sym_offsets, d_sym_pt, d_sym_ft,
+                d_row_trans, N3, d_bad_count, d_bad_first,
                 row0, nRows,
                 d_out);
 
@@ -997,14 +1069,35 @@ int radGPU_AssembleMatrix(
                     recData->abs_rand, recData->rel_rand, recData->zero_rand,
                     recData->act_on_doubles,
                     d_sym_counts, d_sym_offsets, d_sym_pt, d_sym_ft,
+                    d_row_trans, N3, d_bad_count, d_bad_first,
                     row0, nRows,
                     d_out);
                 CU_TRY(cudaGetLastError());
                 CU_TRY(cudaDeviceSynchronize());
             }
 
-            CU_TRY(cudaMemcpy(result->matrix_blocks + (long long)row0 * N * 9, d_out,
-                              pairs*9*sizeof(float), cudaMemcpyDeviceToHost));
+            // Element rows [row0, row0+nRows) are matrix rows
+            // [3*row0, 3*(row0+nRows)) -- still contiguous in scalar
+            // row-major, so the tiled path is unaffected.
+            CU_TRY(cudaMemcpy(result->matrix_blocks + (long long)3*row0 * N3, d_out,
+                              (size_t)nRows*3*N3*sizeof(float), cudaMemcpyDeviceToHost));
+        }
+
+        {   // Non-finite backstop, now applied in the kernel. Report once,
+            // with the offending element pair, so a degenerate (sliver)
+            // element stays attributable instead of surfacing much later as
+            // an unexplained non-finite residual in the solver.
+            unsigned long long nBad = 0; int firstBad = 0x7fffffff;
+            cudaMemcpy(&nBad, d_bad_count, sizeof(nBad), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&firstBad, d_bad_first, sizeof(firstBad), cudaMemcpyDeviceToHost);
+            if(nBad > 0) {
+                fprintf(stderr,
+                    "GPU asm: %llu non-finite interaction-matrix entries zeroed "
+                    "(first at element pair %d,%d of %d). This indicates a degenerate "
+                    "(sliver) element; check the mesh quality of those elements -- the "
+                    "solve will proceed but the result near them is unreliable.\n",
+                    nBad, firstBad / N, firstBad % N, N);
+            }
         }
 
     cleanup:
@@ -1016,6 +1109,7 @@ int radGPU_AssembleMatrix(
         cudaFree(d_edge_pts); cudaFree(d_sym_pt); cudaFree(d_sym_ft);
         cudaFree(d_is_rec); cudaFree(d_rec_centers); cudaFree(d_rec_dims);
         cudaFree(d_out);
+        cudaFree(d_row_trans); cudaFree(d_bad_count); cudaFree(d_bad_first);
         cudaFree(d_sym_counts); cudaFree(d_sym_offsets);
         if(rc != 0 && result->matrix_blocks) {
             delete[] result->matrix_blocks;
@@ -1042,6 +1136,7 @@ void radGPU_FreeAsmData(
         delete[] polyData->face_orig;    polyData->face_orig = nullptr;
         delete[] polyData->edge_pts_2d;  polyData->edge_pts_2d = nullptr;
         delete[] polyData->centers;      polyData->centers = nullptr;
+        delete[] polyData->row_trans;    polyData->row_trans = nullptr;
     }
     if(recData) {
         delete[] recData->is_rec;        recData->is_rec = nullptr;
