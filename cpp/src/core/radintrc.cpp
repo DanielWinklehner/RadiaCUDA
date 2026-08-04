@@ -17,12 +17,14 @@
 
 #include "radintrc.h"
 #include "radsbdrc.h"
+#include "radgalerkin.h"
+
+#include <cmath>    // sqrt (Galerkin near-band test); std::isfinite below
+#include <cstdio>   // fprintf/stderr (Galerkin + GPU fallback diagnostics)
 
 #ifdef RADIA_WITH_CUDA
 #include "radgpu_asm.h"
 #include "radgpu_fld.h"
-#include <cmath>    // std::isfinite (GPU source-field guard)
-#include <cstdio>   // fprintf/stderr (GPU fallback diagnostics)
 #endif
 
 #ifdef _WITH_MPI
@@ -513,6 +515,127 @@ int radTInteraction::CountRelaxElemsWithSym()
 
 //-------------------------------------------------------------------------
 
+//RadiaCUDA: OPT-IN volume-averaged ("Galerkin") assembly -- see radgalerkin.h.
+//Builds the per-row observation quadratures (base rule, and the near-band rule
+//when a cutoff is set). Returns 0 if any element type has no quadrature, in
+//which case the caller must not use the Galerkin path for this model.
+int radTInteraction::PrepGalerkinQuad()
+{
+	const radTGalerkinCfg& cfg = radGalerkinCfg();
+	m_galNearOn = 0;
+	m_galQPts.assign((size_t)AmOfMainElem, vector<TVector3d>());
+	m_galQWts.assign((size_t)AmOfMainElem, vector<double>());
+	m_galCen.assign((size_t)AmOfMainElem, TVector3d(0.,0.,0.));
+	m_galH.assign((size_t)AmOfMainElem, 0.);
+
+	vector<TVector3d> ep; vector<double> ew;
+	long long nPtsBase = 0;
+	for(int i=0; i<AmOfMainElem; i++)
+	{
+		radTg3dRelax* el = g3dRelaxPtrVect[i];
+		if(!radGalerkinElemQuad(el, cfg.K, 0, ep, ew)) return 0;
+		radTrans* tr = MainTransPtrArray[i];
+		m_galQPts[i].resize(ep.size());
+		m_galQWts[i] = ew;
+		for(size_t k=0; k<ep.size(); k++)
+			m_galQPts[i][k] = (tr != 0)? tr->TrPoint(ep[k]) : ep[k];
+		nPtsBase += (long long)ep.size();
+
+		m_galCen[i] = (tr != 0)? tr->TrPoint(el->ReturnCentrPoint())
+		                       : el->ReturnCentrPoint();
+		m_galH[i] = radGalerkinElemSize(el);
+	}
+
+	bool wantNear = (cfg.Cutoff > 0.) &&
+	                ((cfg.KNear != cfg.K) || (cfg.NearLevels > 0));
+	if(wantNear)
+	{
+		m_galNPts.assign((size_t)AmOfMainElem, vector<TVector3d>());
+		m_galNWts.assign((size_t)AmOfMainElem, vector<double>());
+		for(int i=0; i<AmOfMainElem; i++)
+		{
+			radTg3dRelax* el = g3dRelaxPtrVect[i];
+			if(!radGalerkinElemQuad(el, cfg.KNear, cfg.NearLevels, ep, ew)) return 0;
+			radTrans* tr = MainTransPtrArray[i];
+			m_galNPts[i].resize(ep.size());
+			m_galNWts[i] = ew;
+			for(size_t k=0; k<ep.size(); k++)
+				m_galNPts[i][k] = (tr != 0)? tr->TrPoint(ep[k]) : ep[k];
+		}
+		for(int i=0; i<AmOfMainElem; i++) if(m_galH[i] <= 0.) { wantNear = false; break;}
+		m_galNearOn = wantNear? 1 : 0;
+	}
+
+	if(cfg.Debug)
+	{
+		fprintf(stderr, "Galerkin (CPU): base K=%d -> %.2f points/element; "
+		                "near K=%d x 8^%d %s (cutoff %.2f h)\n",
+			cfg.K, (double)nPtsBase/(double)AmOfMainElem, cfg.KNear,
+			cfg.NearLevels, m_galNearOn? "on" : "off", cfg.Cutoff);
+	}
+	return 1;
+}
+
+//-------------------------------------------------------------------------
+
+//RadiaCUDA: the volume-averaged interaction block. TransPtrVect must already
+//hold the COLUMN element's symmetry copies (FillInTransPtrVectForElem(ColNo)),
+//exactly as for the collocation code this replaces. The only difference is that
+//the row element contributes several weighted observation points instead of one.
+void radTInteraction::GalerkinInteractBlock(int StrNo, int ColNo,
+	radTg3dRelax* g3dRelaxPtrColNo, const radTFieldKey& FieldKeyInteract,
+	int AmOfElemWithSym, TMatrix3d& SubMatrix)
+{
+	TVector3d ZeroVect(0.,0.,0.);
+	SubMatrix = TMatrix3d(ZeroVect, ZeroVect, ZeroVect);
+
+	//Near band: the higher-order rule, on the O(N) pairs whose centroids are
+	//within cutoff*max(h_i,h_j). Straight distance test -- the CPU path only
+	//ever runs on small models.
+	const vector<TVector3d>* pPts = &m_galQPts[StrNo];
+	const vector<double>* pWts = &m_galQWts[StrNo];
+	if(m_galNearOn)
+	{
+		const radTGalerkinCfg& cfg = radGalerkinCfg();
+		TVector3d dc = m_galCen[StrNo] - m_galCen[ColNo];
+		double hij = (m_galH[StrNo] > m_galH[ColNo])? m_galH[StrNo] : m_galH[ColNo];
+		if(sqrt(dc.x*dc.x + dc.y*dc.y + dc.z*dc.z) < cfg.Cutoff*hij)
+		{
+			pPts = &m_galNPts[StrNo];
+			pWts = &m_galNWts[StrNo];
+		}
+	}
+
+	TMatrix3d BufSubMatrix;
+	for(size_t iq=0; iq<pPts->size(); iq++)
+	{
+		TVector3d InitObsPoiVect = (*pPts)[iq];
+		double wq = (*pWts)[iq];
+		TMatrix3d AccMatrix(ZeroVect, ZeroVect, ZeroVect);
+		for(unsigned i=0; i<TransPtrVect.size(); i++)
+		{
+			TVector3d ObsPoiVect = TransPtrVect[i]->TrPoint_inv(InitObsPoiVect);
+			radTField Field(FieldKeyInteract, CompCriterium, ObsPoiVect, ZeroVect, ZeroVect, ZeroVect, ZeroVect, 0.);
+			Field.AmOfIntrctElemWithSym = AmOfElemWithSym;
+
+			g3dRelaxPtrColNo->B_comp(&Field);
+			BufSubMatrix.Str0 = Field.B;
+			BufSubMatrix.Str1 = Field.H;
+			BufSubMatrix.Str2 = Field.A;
+
+			TransPtrVect[i]->TrMatrix(BufSubMatrix);
+			AccMatrix += BufSubMatrix;
+		}
+		AccMatrix.Str0 = AccMatrix.Str0*wq;
+		AccMatrix.Str1 = AccMatrix.Str1*wq;
+		AccMatrix.Str2 = AccMatrix.Str2*wq;
+		SubMatrix += AccMatrix;
+	}
+	MainTransPtrArray[StrNo]->TrMatrix_inv(SubMatrix);
+}
+
+//-------------------------------------------------------------------------
+
 int radTInteraction::SetupInteractMatrix() //OC26122019
 //void radTInteraction::SetupInteractMatrix()
 {
@@ -538,19 +661,22 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 			RadGPU_PolyData polyData;
 			RadGPU_RecMagData recData;
 			RadGPU_SymData symData;
+			RadGPU_ObsQuadData quadData;
 			RadGPU_AsmResult result;
 			memset(&polyData, 0, sizeof(polyData));
 			memset(&recData, 0, sizeof(recData));
 			memset(&symData, 0, sizeof(symData));
+			memset(&quadData, 0, sizeof(quadData));
 			memset(&result, 0, sizeof(result));
 
-			if(radGPU_PackGeometryForAsm(this, &polyData, &recData, &symData))
+			if(radGPU_PackGeometryForAsm(this, &polyData, &recData, &symData, &quadData))
 			{
-				if(radGPU_AssembleMatrix(&polyData, &recData, &symData, &result) == 0)
+				if(radGPU_AssembleMatrix(&polyData, &recData, &symData, &quadData, &result) == 0)
 				{
 					radGPU_UnpackMatrix(&result, this);
 					radGPU_FreeAsmData(&polyData, &recData, &result);
 					radGPU_FreeSymData(&symData);
+					radGPU_FreeObsQuadData(&quadData);
 
 					for(int ClNo=0; ClNo<AmOfMainElem; ClNo++)
 					{
@@ -563,9 +689,11 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 				{
 					radGPU_FreeAsmData(&polyData, &recData, &result);
 					radGPU_FreeSymData(&symData);
+					radGPU_FreeObsQuadData(&quadData);
 					Send.WarningMessage("Radia::Warning021"); //GPU assembly could not complete (e.g. out of GPU memory or unimplemented element kernel); falling back to CPU
 				}
 			}
+			else radGPU_FreeObsQuadData(&quadData);
 		}
 #ifdef _WITH_MPI
 		if((m_rankMPI >= 0) && (m_nProcMPI >= 2))
@@ -587,6 +715,16 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 	}
 #endif
 
+	//RadiaCUDA: OPT-IN Galerkin (volume-averaged) assembly. Prepared once here
+	//so both CPU loops below can use it; with the flag off nothing is built and
+	//the collocation code runs exactly as before.
+	char galOn = 0;
+	if(radGalerkinCfg().On)
+	{
+		if(PrepGalerkinQuad()) galOn = 1;
+		else Send.WarningMessage("Radia::Warning024"); //element type without a volume quadrature -> collocation
+	}
+
 	if(m_nProcMPI < 2) //OC01012020
 	{
 		//DEBUG
@@ -597,6 +735,19 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 		{
 			FillInTransPtrVectForElem(ColNo, 'I');
 			radTg3dRelax* g3dRelaxPtrColNo = g3dRelaxPtrVect[ColNo];
+
+			if(galOn)
+			{
+				for(int StrNo=0; StrNo<AmOfMainElem; StrNo++)
+				{
+					TMatrix3d SubMatrix;
+					GalerkinInteractBlock(StrNo, ColNo, g3dRelaxPtrColNo,
+						FieldKeyInteract, AmOfElemWithSym, SubMatrix);
+					InteractMatrix[StrNo][ColNo] = SubMatrix;
+				}
+				EmptyTransPtrVect();
+				continue;
+			}
 
 			for(int StrNo=0; StrNo<AmOfMainElem; StrNo++)
 			{
@@ -801,6 +952,18 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 
 						for(int iStr=iStrStart; iStr<iStrEnd; iStr++)
 						{
+							TMatrix3d SubMatrix(ZeroVect, ZeroVect, ZeroVect), BufSubMatrix;
+							if(galOn)
+							{
+								GalerkinInteractBlock(iStr, iCol, g3dRelaxPtrColNo,
+									FieldKeyInteract, AmOfElemWithSym, SubMatrix);
+								TVector3d &g0 = SubMatrix.Str0, &g1 = SubMatrix.Str1, &g2 = SubMatrix.Str2;
+								*(t_arBufElem++) = (float)g0.x; *(t_arBufElem++) = (float)g0.y;  *(t_arBufElem++) = (float)g0.z;
+								*(t_arBufElem++) = (float)g1.x; *(t_arBufElem++) = (float)g1.y;  *(t_arBufElem++) = (float)g1.z;
+								*(t_arBufElem++) = (float)g2.x; *(t_arBufElem++) = (float)g2.y;  *(t_arBufElem++) = (float)g2.z;
+								continue;
+							}
+
 							TVector3d InitObsPoiVect = MainTransPtrArray[iStr]->TrPoint((g3dRelaxPtrVect[iStr])->ReturnCentrPoint());
 
 							//if((iCol == 0) && (iStr == 0)) //DEBUG
@@ -809,7 +972,6 @@ int radTInteraction::SetupInteractMatrix() //OC26122019
 							//	std::cout.flush(); //DEBUG
 							//}
 
-							TMatrix3d SubMatrix(ZeroVect, ZeroVect, ZeroVect), BufSubMatrix;
 							for(unsigned i=0; i<TransPtrVect.size(); i++)
 							{
 								TVector3d ObsPoiVect = TransPtrVect[i]->TrPoint_inv(InitObsPoiVect);

@@ -18,15 +18,187 @@
 #include "radvlpgn.h"
 #include "radplnr.h"
 #include "radtrans.h"
+#include "radgalerkin.h"
 
 #include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <vector>
+#include <algorithm>
 
 // (Removed dead, buggy ExtractPolyFaceData helper: it was never called, and its
 //  face_rot fill wrote the same diagonal-only row three times. The live packing in
 //  radGPU_PackGeometryForAsm computes face_rot correctly inline. See issue #11.)
+
+// ============================================================
+// Observation-element quadrature (Galerkin; radgalerkin.h).
+//
+// Collocation is packed as a single point per element -- the transformed
+// centroid -- with weight 1, so the kernel's quadrature loop degenerates to
+// exactly the old arithmetic.
+//
+// Returns 1 on success, 0 if some element's quadrature could not be built (the
+// caller then declines the GPU path, as it does for unknown element types).
+// ============================================================
+int radGPU_PackObsQuadForAsm(radTInteraction* intrct, RadGPU_ObsQuadData* qd)
+{
+    const radTGalerkinCfg& cfg = radGalerkinCfg();
+    int N = intrct->AmOfMainElem;
+    memset(qd, 0, sizeof(RadGPU_ObsQuadData));
+    qd->on = cfg.On ? 1 : 0;
+    qd->n_elem = N;
+
+    int Kbase = cfg.On ? cfg.K : 1;
+    int LevBase = 0;                       // the base rule is never subdivided
+
+    std::vector<int> off(N + 1, 0);
+    std::vector<double> pts, wts;
+    std::vector<TVector3d> ep;
+    std::vector<double> ew;
+    pts.reserve((size_t)N * 4 * 3);
+    wts.reserve((size_t)N * 4);
+
+    for(int i = 0; i < N; i++) {
+        off[i] = (int)wts.size();
+        radTg3dRelax* el = intrct->g3dRelaxPtrVect[i];
+        if(!radGalerkinElemQuad(el, Kbase, LevBase, ep, ew)) return 0;
+        radTrans* tr = intrct->MainTransPtrArray[i];
+        for(size_t k = 0; k < ep.size(); k++) {
+            TVector3d p = (tr != 0) ? tr->TrPoint(ep[k]) : ep[k];
+            pts.push_back(p.x); pts.push_back(p.y); pts.push_back(p.z);
+            wts.push_back(ew[k]);
+        }
+    }
+    off[N] = (int)wts.size();
+
+    qd->q_total = (int)wts.size();
+    qd->q_offsets = new int[N + 1];
+    qd->q_pts = new double[3 * (size_t)qd->q_total];
+    qd->q_w = new double[(size_t)qd->q_total];
+    memcpy(qd->q_offsets, &off[0], (size_t)(N + 1) * sizeof(int));
+    memcpy(qd->q_pts, &pts[0], 3 * (size_t)qd->q_total * sizeof(double));
+    memcpy(qd->q_w, &wts[0], (size_t)qd->q_total * sizeof(double));
+
+    if(cfg.Debug) {
+        fprintf(stderr, "Galerkin: base rule K=%d -> %.2f points/element "
+                        "(N=%d, total %d)\n",
+                Kbase, (double)qd->q_total / (double)N, N, qd->q_total);
+    }
+
+    // --- near pass ---------------------------------------------------
+    if(!cfg.On || (cfg.Cutoff <= 0.) ||
+       ((cfg.KNear == Kbase) && (cfg.NearLevels <= 0))) return 1;
+
+    // Near-band quadrature, same layout as the base rule.
+    std::vector<int> noff(N + 1, 0);
+    std::vector<double> npts, nwts;
+    for(int i = 0; i < N; i++) {
+        noff[i] = (int)nwts.size();
+        radTg3dRelax* el = intrct->g3dRelaxPtrVect[i];
+        if(!radGalerkinElemQuad(el, cfg.KNear, cfg.NearLevels, ep, ew)) return 0;
+        radTrans* tr = intrct->MainTransPtrArray[i];
+        for(size_t k = 0; k < ep.size(); k++) {
+            TVector3d p = (tr != 0) ? tr->TrPoint(ep[k]) : ep[k];
+            npts.push_back(p.x); npts.push_back(p.y); npts.push_back(p.z);
+            nwts.push_back(ew[k]);
+        }
+    }
+    noff[N] = (int)nwts.size();
+
+    // Near-pair list. Centroids in the same (transformed) frame the kernel
+    // observes in, and h_i = V^(1/3) per element; a pair is "near" when
+    // |c_i - c_j| < cutoff * max(h_i, h_j). Bucketed on a uniform grid of
+    // cutoff*h_max so the scan is O(N), not O(N^2).
+    std::vector<double> cx(N), cy(N), cz(N), hh(N);
+    double hMax = 0.;
+    for(int i = 0; i < N; i++) {
+        radTg3dRelax* el = intrct->g3dRelaxPtrVect[i];
+        radTrans* tr = intrct->MainTransPtrArray[i];
+        TVector3d c = (tr != 0) ? tr->TrPoint(el->ReturnCentrPoint())
+                                : el->ReturnCentrPoint();
+        cx[i] = c.x; cy[i] = c.y; cz[i] = c.z;
+        hh[i] = radGalerkinElemSize(el);
+        if(hh[i] > hMax) hMax = hh[i];
+    }
+    if(hMax <= 0.) return 0;
+
+    double cell = cfg.Cutoff * hMax;
+    if(!(cell > 0.)) return 0;
+    double xlo = *std::min_element(cx.begin(), cx.end());
+    double ylo = *std::min_element(cy.begin(), cy.end());
+    double zlo = *std::min_element(cz.begin(), cz.end());
+    double xhi = *std::max_element(cx.begin(), cx.end());
+    double yhi = *std::max_element(cy.begin(), cy.end());
+    double zhi = *std::max_element(cz.begin(), cz.end());
+    long long nx = (long long)((xhi - xlo) / cell) + 1;
+    long long ny = (long long)((yhi - ylo) / cell) + 1;
+    long long nz = (long long)((zhi - zlo) / cell) + 1;
+    // Keep the grid from exploding on very non-uniform meshes.
+    while(nx * ny * nz > 8LL * N + 64LL) {
+        cell *= 1.5;
+        nx = (long long)((xhi - xlo) / cell) + 1;
+        ny = (long long)((yhi - ylo) / cell) + 1;
+        nz = (long long)((zhi - zlo) / cell) + 1;
+    }
+    std::vector<std::vector<int> > bucket((size_t)(nx * ny * nz));
+    std::vector<long long> bi(N);
+    for(int i = 0; i < N; i++) {
+        long long ix = (long long)((cx[i] - xlo) / cell); if(ix >= nx) ix = nx - 1;
+        long long iy = (long long)((cy[i] - ylo) / cell); if(iy >= ny) iy = ny - 1;
+        long long iz = (long long)((cz[i] - zlo) / cell); if(iz >= nz) iz = nz - 1;
+        bi[i] = (ix * ny + iy) * nz + iz;
+        bucket[(size_t)bi[i]].push_back(i);
+    }
+
+    std::vector<int> rows, cols;
+    for(int i = 0; i < N; i++) {
+        long long ix = bi[i] / (ny * nz);
+        long long rem = bi[i] - ix * ny * nz;
+        long long iy = rem / nz, iz = rem - iy * nz;
+        for(long long dx = -1; dx <= 1; dx++)
+        for(long long dy = -1; dy <= 1; dy++)
+        for(long long dz = -1; dz <= 1; dz++) {
+            long long jx = ix + dx, jy = iy + dy, jz = iz + dz;
+            if((jx < 0) || (jy < 0) || (jz < 0) || (jx >= nx) || (jy >= ny) || (jz >= nz))
+                continue;
+            const std::vector<int>& b = bucket[(size_t)((jx * ny + jy) * nz + jz)];
+            for(size_t k = 0; k < b.size(); k++) {
+                int j = b[k];
+                double ddx = cx[i] - cx[j], ddy = cy[i] - cy[j], ddz = cz[i] - cz[j];
+                double d = sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+                double hij = (hh[i] > hh[j]) ? hh[i] : hh[j];
+                if(d < cfg.Cutoff * hij) { rows.push_back(i); cols.push_back(j);}
+            }
+        }
+    }
+
+    qd->n_total = (int)nwts.size();
+    qd->n_offsets = new int[N + 1];
+    memcpy(qd->n_offsets, &noff[0], (size_t)(N + 1) * sizeof(int));
+    if(qd->n_total > 0) {
+        qd->n_pts = new double[3 * (size_t)qd->n_total];
+        qd->n_w = new double[(size_t)qd->n_total];
+        memcpy(qd->n_pts, &npts[0], 3 * (size_t)qd->n_total * sizeof(double));
+        memcpy(qd->n_w, &nwts[0], (size_t)qd->n_total * sizeof(double));
+    }
+    qd->n_pairs = (int)rows.size();
+    if(qd->n_pairs > 0) {
+        qd->pair_rows = new int[(size_t)qd->n_pairs];
+        qd->pair_cols = new int[(size_t)qd->n_pairs];
+        memcpy(qd->pair_rows, &rows[0], (size_t)qd->n_pairs * sizeof(int));
+        memcpy(qd->pair_cols, &cols[0], (size_t)qd->n_pairs * sizeof(int));
+    }
+
+    if(cfg.Debug) {
+        fprintf(stderr, "Galerkin: near rule K=%d x 8^%d -> %.1f points/element; "
+                        "%d near pairs (cutoff %.2f h, %.3f%% of N^2, %.1f per element)\n",
+                cfg.KNear, cfg.NearLevels, (double)qd->n_total / (double)N,
+                qd->n_pairs, cfg.Cutoff,
+                100. * (double)qd->n_pairs / ((double)N * (double)N),
+                (double)qd->n_pairs / (double)N);
+    }
+    return 1;
+}
 
 // ============================================================
 // Pack geometry from Radia interaction data
@@ -35,7 +207,8 @@ int radGPU_PackGeometryForAsm(
     radTInteraction* intrct,
     RadGPU_PolyData* polyData,
     RadGPU_RecMagData* recData,
-    RadGPU_SymData* symData)
+    RadGPU_SymData* symData,
+    RadGPU_ObsQuadData* quadData)
 {
     int N = intrct->AmOfMainElem;
     if(N <= 0) return 0;
@@ -238,6 +411,17 @@ int radGPU_PackGeometryForAsm(
         intrct->EmptyTransPtrVect();
     }
 
+    // Observation-element quadrature (collocation = one centroid point, so
+    // this is packed unconditionally). Must come last: it reads
+    // g3dRelaxPtrVect, which the caller replaces with FormalIntrctMemberPtr
+    // only after assembly.
+    if(!radGPU_PackObsQuadForAsm(intrct, quadData)) {
+        // Some element has no volume quadrature -- decline the GPU path. The
+        // CPU fallback then reports Warning024 if Galerkin was requested.
+        radTSend::WarningMessage("Radia::Warning020");
+        return 0;
+    }
+
     return 1;
 }
 
@@ -296,6 +480,20 @@ void radGPU_UnpackMatrix(
             "solve will proceed but the result near them is unreliable.\n",
             nBadEntries, firstBadI, firstBadJ, N);
     }
+}
+
+void radGPU_FreeObsQuadData(RadGPU_ObsQuadData* qd)
+{
+    if(!qd) return;
+    delete[] qd->q_offsets; qd->q_offsets = nullptr;
+    delete[] qd->q_pts;     qd->q_pts = nullptr;
+    delete[] qd->q_w;       qd->q_w = nullptr;
+    delete[] qd->n_offsets; qd->n_offsets = nullptr;
+    delete[] qd->n_pts;     qd->n_pts = nullptr;
+    delete[] qd->n_w;       qd->n_w = nullptr;
+    delete[] qd->pair_rows; qd->pair_rows = nullptr;
+    delete[] qd->pair_cols; qd->pair_cols = nullptr;
+    qd->q_total = qd->n_total = qd->n_pairs = 0;
 }
 
 void radGPU_FreeSymData(RadGPU_SymData* symData)

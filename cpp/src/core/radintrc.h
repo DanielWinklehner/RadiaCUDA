@@ -91,7 +91,8 @@ class radTInteraction : public radTg {
 	friend void radGPU_UnpackMagnetization(struct RadGPURelaxData*, radTInteraction*);
 	friend int radGPU_AutoRelax(radTInteraction*, double, int, char, double);
 	friend int radGPU_AutoRelaxNK(radTInteraction*, double, int, char, double);
-	friend int radGPU_PackGeometryForAsm(radTInteraction*, struct RadGPU_PolyData*, struct RadGPU_RecMagData*, struct RadGPU_SymData*);
+	friend int radGPU_PackGeometryForAsm(radTInteraction*, struct RadGPU_PolyData*, struct RadGPU_RecMagData*, struct RadGPU_SymData*, struct RadGPU_ObsQuadData*);
+	friend int radGPU_PackObsQuadForAsm(radTInteraction*, struct RadGPU_ObsQuadData*);
 	friend void radGPU_UnpackMatrix(struct RadGPU_AsmResult*, radTInteraction*);
 
 public:
@@ -136,6 +137,26 @@ private:
 
 	int m_rankMPI; //21122019 (to set from Application?)
 	int m_nProcMPI;
+
+	//RadiaCUDA: OPT-IN volume-averaged ("Galerkin") assembly, radgalerkin.h.
+	//All of these stay EMPTY unless RADIA_GALERKIN=1, and the collocation code
+	//paths are then untouched, so the flag being off is a true no-op.
+	//Per row element: the base-rule and near-rule observation quadratures,
+	//already transformed by MainTransPtrArray[i]; the transformed centroid and
+	//the characteristic size h = V^(1/3) used for the near-band radius.
+	vector<vector<TVector3d> > m_galQPts, m_galNPts;
+	vector<vector<double> > m_galQWts, m_galNWts;
+	vector<TVector3d> m_galCen;
+	vector<double> m_galH;
+	char m_galNearOn = 0;
+
+	//Builds the caches above; returns 0 if any element type has no quadrature.
+	int PrepGalerkinQuad();
+	//Interaction block for (row StrNo, the column element whose symmetry copies
+	//are already in TransPtrVect), volume-averaged over the row element.
+	void GalerkinInteractBlock(int StrNo, int ColNo, radTg3dRelax* g3dRelaxPtrColNo,
+		const radTFieldKey& FieldKeyInteract, int AmOfElemWithSym,
+		TMatrix3d& SubMatrix);
 
 public:
 

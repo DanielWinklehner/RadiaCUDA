@@ -168,7 +168,7 @@ string radTIOBuffer::err_ar[] = {
 
 //-------------------------------------------------------------------------
 
-int radTIOBuffer::AmOfWarnings = 15; //modify this when adding new warning !!!
+int radTIOBuffer::AmOfWarnings = 16; //modify this when adding new warning !!!
 string radTIOBuffer::warn_ar[] = {
 
 	"Radia::WarningXXX::::Wrong Warning Number.\0",
@@ -186,6 +186,7 @@ string radTIOBuffer::warn_ar[] = {
 	"Radia::Warning021::::GPU interaction-matrix assembly could not be completed (e.g. insufficient GPU memory); computation performed on CPU.\0",
 	"Radia::Warning022::::GPU relaxation solve does not support anisotropic linear materials (KsiPar != KsiPerp); computation performed on CPU.\0",
 	"Radia::Warning023::::GPU relaxation solve does not support staged (sub-interval) relaxation; computation performed on CPU.\0",
+	"Radia::Warning024::::RADIA_GALERKIN was requested but an element has no volume quadrature (it is neither a polyhedron nor a RecMag); the interaction matrix was assembled with the DEFAULT center collocation instead.\0",
 	//insert new warning here
 };
 

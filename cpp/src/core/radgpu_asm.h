@@ -27,7 +27,12 @@ struct RadGPU_PolyData {
     int n_edges_total;
 
     // Per-element
-    double* centers;        // [3 * n_elem] transformed observation centers (all elements)
+    double* centers;        // [3 * n_elem] transformed observation centers (all
+                            // elements). The assembly kernel no longer reads
+                            // this -- it takes its observation points from
+                            // RadGPU_ObsQuadData, which carries the same
+                            // centroids in the collocation (default) case.
+                            // Kept because it documents/defines the frame.
     int* face_offsets;      // [n_elem + 1] CSR into face arrays (empty range for RecMags)
 
     // Per-face
@@ -77,6 +82,43 @@ struct RadGPU_SymData {
 //};
 
 // ============================================================
+// Observation-element quadrature (OPT-IN Galerkin assembly; radgalerkin.h).
+//
+// Collocation (the default) is the degenerate case of this: exactly one point
+// per element -- the transformed centroid -- with weight 1. The kernel then
+// computes 0 + 1.0*block, which is bit-identical to the old single-point code
+// (multiplication by 1.0 and addition to 0 are exact in IEEE-754), so the flag
+// being off is a true no-op. tests/test_galerkin_asm.py checks this.
+//
+// `on` only controls the NEAR pass and the diagnostics; the base arrays are
+// always used.
+// ============================================================
+struct RadGPU_ObsQuadData {
+    int on;                 // 1 = Galerkin enabled (near pass may be present)
+    int n_elem;
+
+    // Base rule -- applied to EVERY pair. STEP 1 (studies/GALERKIN_STEP1.md)
+    // showed a distance cutoff cannot be used here: the per-pair corrections
+    // very nearly cancel for smooth M, so truncating the sum overshoots the
+    // true correction by more than the correction itself.
+    int* q_offsets;         // [n_elem + 1] CSR into q_pts / q_w
+    double* q_pts;          // [3 * q_total] observation points, LAB frame
+                            //               (already through MainTransPtrArray)
+    double* q_w;            // [q_total] weights; sum to 1 per element
+    int q_total;
+
+    // Near pass -- a higher-order rule on the O(N) near-pair list, which
+    // replaces those entries after the base pass.
+    int* n_offsets;         // [n_elem + 1] CSR into n_pts / n_w
+    double* n_pts;          // [3 * n_total]
+    double* n_w;            // [n_total]
+    int n_total;
+    int* pair_rows;         // [n_pairs] observation element index
+    int* pair_cols;         // [n_pairs] source element index
+    int n_pairs;
+};
+
+// ============================================================
 // Assembly output: flat interaction matrix blocks
 // ============================================================
 struct RadGPU_AsmResult {
@@ -88,18 +130,27 @@ struct RadGPU_AsmResult {
 // GPU assembly functions
 // ============================================================
 
+// Pack the observation-element quadrature (called by radGPU_PackGeometryForAsm;
+// separate only so it can be a friend of radTInteraction). Returns 0 if some
+// element type has no volume quadrature.
+int radGPU_PackObsQuadForAsm(
+    class radTInteraction* intrct,
+    RadGPU_ObsQuadData* quadData);
+
 // Pack geometry from Radia interaction data
 int radGPU_PackGeometryForAsm(
     class radTInteraction* intrct,
     RadGPU_PolyData* polyData,
     RadGPU_RecMagData* recData,
-    RadGPU_SymData* symData);
+    RadGPU_SymData* symData,
+    RadGPU_ObsQuadData* quadData);
 
 // Run GPU assembly — fills result->matrix_blocks
 int radGPU_AssembleMatrix(
     RadGPU_PolyData* polyData,
     RadGPU_RecMagData* recData,
     RadGPU_SymData* symData,
+    RadGPU_ObsQuadData* quadData,
     RadGPU_AsmResult* result);
 
 // Unpack GPU matrix into Radia's TMatrix3df format
@@ -112,6 +163,8 @@ void radGPU_FreeAsmData(
     RadGPU_PolyData* polyData,
     RadGPU_RecMagData* recData,
     RadGPU_AsmResult* result);
+
+void radGPU_FreeObsQuadData(RadGPU_ObsQuadData* quadData);
 
 void radGPU_FreeSymData(RadGPU_SymData* symData);
 

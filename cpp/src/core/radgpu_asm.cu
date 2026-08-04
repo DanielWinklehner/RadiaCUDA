@@ -486,61 +486,38 @@ __device__ void transpose3x3(const double* A, double* AT)
 }
 
 // ============================================================
-// Kernel: Assemble interaction matrix, mixed element types.
-// One thread per (obs_elem, src_elem) pair. The Q block depends only on
-// the SOURCE element's type (the observer contributes just its center
-// point), so a per-source branch covers RecMag<->RecMag, poly<->poly and
-// both cross blocks alike.
+// Device: the 3x3 interaction block from ONE source element at ONE
+// observation point, summed over the source's symmetry copies.
+//
+// This is the whole cost of assembly. It is factored out so the base pass and
+// the Galerkin near pass share exactly the same arithmetic -- and so that the
+// collocation case (a single observation point of weight 1) stays bit-exact:
+// the caller computes 0 + 1.0*block, both operations exact in IEEE-754.
 // ============================================================
-__global__ void assemble_mixed_kernel(
-    int N,
-    const double* __restrict__ obs_centers,    // [N*3] transformed observation centers
-    const double* __restrict__ src_centers,     // [N*3] raw element centers
-    const int* __restrict__ face_offsets,       // [N+1] (empty range for RecMags)
-    const int* __restrict__ edge_offsets,       // [n_faces_total+1]
-    const double* __restrict__ face_cz,         // [n_faces_total]
-    const double* __restrict__ face_rot,        // [n_faces_total*9] lab->local rotation
-    const double* __restrict__ face_orig,       // [n_faces_total*3] face origin in lab
-    const double* __restrict__ edge_pts_2d,     // [n_edges_total*2]
-    const int* __restrict__ is_rec,             // [N] 1 = RecMag source
-    const double* __restrict__ rec_centers,     // [N*3] cuboid centers (own frame)
-    const double* __restrict__ rec_dims,        // [N*3] cuboid FULL dimensions
-    double rec_abs_rand,                        // radCR tolerance snapshot
-    double rec_rel_rand,
-    double rec_zero_rand,
+__device__ __forceinline__ void pair_block_dev(
+    int src_idx,
+    const double obs_lab[3],
+    const int* __restrict__ face_offsets,
+    const int* __restrict__ edge_offsets,
+    const double* __restrict__ face_cz,
+    const double* __restrict__ face_rot,
+    const double* __restrict__ face_orig,
+    const double* __restrict__ edge_pts_2d,
+    const int* __restrict__ is_rec,
+    const double* __restrict__ rec_centers,
+    const double* __restrict__ rec_dims,
+    double rec_abs_rand, double rec_rel_rand, double rec_zero_rand,
     int rec_act_on_doubles,
     const int* __restrict__ sym_counts,
     const int* __restrict__ sym_offsets,
     const double* __restrict__ sym_point_tr,
     const double* __restrict__ sym_field_tr,
-
-    int row_begin,                              // first matrix row in this tile
-    int n_rows,                                 // rows in this tile (N = whole matrix)
-    float* __restrict__ out_blocks              // [n_rows*N*9], TILE-local
-)
+    double block[9])
 {
-    long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    long long total = (long long)n_rows * N;
-    if(tid >= total) return;
-
-    // Row-block tiling: the observation row is offset into the full matrix,
-    // the output index stays tile-local. row_begin=0, n_rows=N reproduces the
-    // whole-matrix launch exactly (same tid -> same (obs,src) -> same slot).
-    int obs_idx = row_begin + (int)(tid / N);  // row (StrNo)
-    int src_idx = (int)(tid % N);              // column (ColNo)
-
     const double PI = 3.14159265358979;
     const double ConstForH = 1.0 / (4.0 * PI);
 
-    // Observation point in lab frame
-    double obs_lab[3] = {
-        obs_centers[3*obs_idx],
-        obs_centers[3*obs_idx+1],
-        obs_centers[3*obs_idx+2]
-    };
-
-    // Accumulate 3x3 block over symmetry copies
-    double block[9] = {0,0,0, 0,0,0, 0,0,0};
+    for(int k = 0; k < 9; k++) block[k] = 0.0;
 
     int srcIsRec = is_rec[src_idx];
     int fStart = face_offsets[src_idx];
@@ -660,11 +637,147 @@ __global__ void assemble_mixed_kernel(
         for(int k = 0; k < 9; k++)
             block[k] += result[k];
     }
+}
+
+// ============================================================
+// Kernel: Assemble interaction matrix, mixed element types.
+// One thread per (obs_elem, src_elem) pair. The Q block depends only on
+// the SOURCE element's type (the observer contributes just its observation
+// points), so a per-source branch covers RecMag<->RecMag, poly<->poly and
+// both cross blocks alike.
+//
+// The observation element contributes a QUADRATURE (radgpu_asm.h,
+// RadGPU_ObsQuadData): one point of weight 1 at the transformed centroid for
+// Radia's default center collocation, several points for the opt-in Galerkin
+// (volume-averaged) assembly. The single-point case reduces to
+// 0 + 1.0*block, which is bit-identical to the pre-quadrature code.
+// ============================================================
+__global__ void assemble_mixed_kernel(
+    int N,
+    const int* __restrict__ q_offsets,          // [N+1] CSR into obs quadrature
+    const double* __restrict__ q_pts,           // [3*q_total] obs points (lab)
+    const double* __restrict__ q_w,             // [q_total] weights, sum 1/element
+    const int* __restrict__ face_offsets,       // [N+1] (empty range for RecMags)
+    const int* __restrict__ edge_offsets,       // [n_faces_total+1]
+    const double* __restrict__ face_cz,         // [n_faces_total]
+    const double* __restrict__ face_rot,        // [n_faces_total*9] lab->local rotation
+    const double* __restrict__ face_orig,       // [n_faces_total*3] face origin in lab
+    const double* __restrict__ edge_pts_2d,     // [n_edges_total*2]
+    const int* __restrict__ is_rec,             // [N] 1 = RecMag source
+    const double* __restrict__ rec_centers,     // [N*3] cuboid centers (own frame)
+    const double* __restrict__ rec_dims,        // [N*3] cuboid FULL dimensions
+    double rec_abs_rand,                        // radCR tolerance snapshot
+    double rec_rel_rand,
+    double rec_zero_rand,
+    int rec_act_on_doubles,
+    const int* __restrict__ sym_counts,
+    const int* __restrict__ sym_offsets,
+    const double* __restrict__ sym_point_tr,
+    const double* __restrict__ sym_field_tr,
+
+    int row_begin,                              // first matrix row in this tile
+    int n_rows,                                 // rows in this tile (N = whole matrix)
+    float* __restrict__ out_blocks              // [n_rows*N*9], TILE-local
+)
+{
+    long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)n_rows * N;
+    if(tid >= total) return;
+
+    // Row-block tiling: the observation row is offset into the full matrix,
+    // the output index stays tile-local. row_begin=0, n_rows=N reproduces the
+    // whole-matrix launch exactly (same tid -> same (obs,src) -> same slot).
+    int obs_idx = row_begin + (int)(tid / N);  // row (StrNo)
+    int src_idx = (int)(tid % N);              // column (ColNo)
+
+    double acc[9] = {0,0,0, 0,0,0, 0,0,0};
+    int qBeg = q_offsets[obs_idx], qEnd = q_offsets[obs_idx + 1];
+    for(int iq = qBeg; iq < qEnd; iq++)
+    {
+        double obs_lab[3] = {q_pts[3*iq], q_pts[3*iq+1], q_pts[3*iq+2]};
+        double block[9];
+        pair_block_dev(src_idx, obs_lab,
+                       face_offsets, edge_offsets, face_cz, face_rot, face_orig,
+                       edge_pts_2d, is_rec, rec_centers, rec_dims,
+                       rec_abs_rand, rec_rel_rand, rec_zero_rand, rec_act_on_doubles,
+                       sym_counts, sym_offsets, sym_point_tr, sym_field_tr,
+                       block);
+        double wq = q_w[iq];
+        for(int k = 0; k < 9; k++) acc[k] += wq * block[k];
+    }
 
     // Store result
     long long outIdx = tid * 9;
     for(int k = 0; k < 9; k++)
-        out_blocks[outIdx + k] = (float)block[k];
+        out_blocks[outIdx + k] = (float)acc[k];
+}
+
+// ============================================================
+// Kernel: Galerkin NEAR pass. One thread per entry of the precomputed
+// near-pair list; recomputes that entry with the higher-order rule and
+// OVERWRITES what the base pass left there.
+//
+// Kept as a separate sparse kernel rather than a per-pair branch inside the
+// N^2 loop so the hot loop stays warp-uniform and the extra cost is O(N),
+// predictable and separately measurable.
+// ============================================================
+__global__ void assemble_near_kernel(
+    int N,
+    const int* __restrict__ pair_rows,
+    const int* __restrict__ pair_cols,
+    int n_pairs,
+    const int* __restrict__ n_offsets,
+    const double* __restrict__ n_pts,
+    const double* __restrict__ n_w,
+    const int* __restrict__ face_offsets,
+    const int* __restrict__ edge_offsets,
+    const double* __restrict__ face_cz,
+    const double* __restrict__ face_rot,
+    const double* __restrict__ face_orig,
+    const double* __restrict__ edge_pts_2d,
+    const int* __restrict__ is_rec,
+    const double* __restrict__ rec_centers,
+    const double* __restrict__ rec_dims,
+    double rec_abs_rand,
+    double rec_rel_rand,
+    double rec_zero_rand,
+    int rec_act_on_doubles,
+    const int* __restrict__ sym_counts,
+    const int* __restrict__ sym_offsets,
+    const double* __restrict__ sym_point_tr,
+    const double* __restrict__ sym_field_tr,
+
+    int row_begin,
+    int n_rows,
+    float* __restrict__ out_blocks
+)
+{
+    long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if(tid >= (long long)n_pairs) return;
+
+    int obs_idx = pair_rows[tid];
+    if((obs_idx < row_begin) || (obs_idx >= row_begin + n_rows)) return;
+    int src_idx = pair_cols[tid];
+
+    double acc[9] = {0,0,0, 0,0,0, 0,0,0};
+    int qBeg = n_offsets[obs_idx], qEnd = n_offsets[obs_idx + 1];
+    for(int iq = qBeg; iq < qEnd; iq++)
+    {
+        double obs_lab[3] = {n_pts[3*iq], n_pts[3*iq+1], n_pts[3*iq+2]};
+        double block[9];
+        pair_block_dev(src_idx, obs_lab,
+                       face_offsets, edge_offsets, face_cz, face_rot, face_orig,
+                       edge_pts_2d, is_rec, rec_centers, rec_dims,
+                       rec_abs_rand, rec_rel_rand, rec_zero_rand, rec_act_on_doubles,
+                       sym_counts, sym_offsets, sym_point_tr, sym_field_tr,
+                       block);
+        double wq = n_w[iq];
+        for(int k = 0; k < 9; k++) acc[k] += wq * block[k];
+    }
+
+    long long outIdx = ((long long)(obs_idx - row_begin) * N + src_idx) * 9;
+    for(int k = 0; k < 9; k++)
+        out_blocks[outIdx + k] = (float)acc[k];
 }
 
 // ============================================================
@@ -692,9 +805,11 @@ int radGPU_AssembleMatrix(
     RadGPU_PolyData* polyData,
     RadGPU_RecMagData* recData,
     RadGPU_SymData* symData,
+    RadGPU_ObsQuadData* quadData,
     RadGPU_AsmResult* result)
 {
     if(!polyData || polyData->n_elem <= 0 || !recData) return -1;
+    if(!quadData || quadData->q_total <= 0 || !quadData->q_offsets) return -1;
     int N = polyData->n_elem;  // total elements (poly + RecMag; see packing)
 
     long long totalPairs = (long long)N * N;
@@ -745,7 +860,7 @@ int radGPU_AssembleMatrix(
     {
         // Upload geometry to GPU. All device pointers are nullptr-initialized so the
         // `cleanup` label can cudaFree() them unconditionally on any error path.
-        double *d_obs=nullptr, *d_centers=nullptr, *d_face_cz=nullptr, *d_face_rot=nullptr,
+        double *d_face_cz=nullptr, *d_face_rot=nullptr,
                *d_face_orig=nullptr, *d_edge_pts=nullptr;
         int *d_face_offsets=nullptr, *d_edge_offsets=nullptr;
         int *d_is_rec=nullptr;
@@ -753,6 +868,11 @@ int radGPU_AssembleMatrix(
         float *d_out=nullptr;
         int *d_sym_counts=nullptr, *d_sym_offsets=nullptr;
         double *d_sym_pt=nullptr, *d_sym_ft=nullptr;
+        // Observation quadrature: base pass (always) and Galerkin near pass.
+        int *d_q_off=nullptr, *d_n_off=nullptr, *d_pair_rows=nullptr, *d_pair_cols=nullptr;
+        double *d_q_pts=nullptr, *d_q_w=nullptr, *d_n_pts=nullptr, *d_n_w=nullptr;
+        const bool haveNear = (quadData->on != 0) && (quadData->n_pairs > 0) &&
+                              (quadData->n_total > 0) && (quadData->n_offsets != nullptr);
 
         int nFaces = polyData->n_faces_total;   // 0 for a pure-RecMag model
         int nEdges = polyData->n_edges_total;
@@ -770,8 +890,16 @@ int radGPU_AssembleMatrix(
         size_t nFacesAlloc = (nFaces > 0)? (size_t)nFaces : 1;
         size_t nEdgesAlloc = (nEdges > 0)? (size_t)nEdges : 1;
 
-        CU_MALLOC(d_obs,          3*(size_t)N*sizeof(double));
-        CU_MALLOC(d_centers,      3*(size_t)N*sizeof(double));
+        CU_MALLOC(d_q_off,        ((size_t)N+1)*sizeof(int));
+        CU_MALLOC(d_q_pts,        3*(size_t)quadData->q_total*sizeof(double));
+        CU_MALLOC(d_q_w,          (size_t)quadData->q_total*sizeof(double));
+        if(haveNear) {
+            CU_MALLOC(d_n_off,     ((size_t)N+1)*sizeof(int));
+            CU_MALLOC(d_n_pts,     3*(size_t)quadData->n_total*sizeof(double));
+            CU_MALLOC(d_n_w,       (size_t)quadData->n_total*sizeof(double));
+            CU_MALLOC(d_pair_rows, (size_t)quadData->n_pairs*sizeof(int));
+            CU_MALLOC(d_pair_cols, (size_t)quadData->n_pairs*sizeof(int));
+        }
         CU_MALLOC(d_face_offsets, ((size_t)N+1)*sizeof(int));
         CU_MALLOC(d_edge_offsets, (nFacesAlloc+1)*sizeof(int));
         CU_MALLOC(d_face_cz,      nFacesAlloc*sizeof(double));
@@ -804,8 +932,16 @@ int radGPU_AssembleMatrix(
         CU_MALLOC(d_sym_pt,       (size_t)totalCopies*9*sizeof(double));
         CU_MALLOC(d_sym_ft,       (size_t)totalCopies*9*sizeof(double));
 
-        CU_TRY(cudaMemcpy(d_obs,          polyData->centers,          3*(size_t)N*sizeof(double),           cudaMemcpyHostToDevice));
-        CU_TRY(cudaMemcpy(d_centers,      polyData->centers,          3*(size_t)N*sizeof(double),           cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_q_off,        quadData->q_offsets,        ((size_t)N+1)*sizeof(int),            cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_q_pts,        quadData->q_pts,            3*(size_t)quadData->q_total*sizeof(double), cudaMemcpyHostToDevice));
+        CU_TRY(cudaMemcpy(d_q_w,          quadData->q_w,              (size_t)quadData->q_total*sizeof(double),   cudaMemcpyHostToDevice));
+        if(haveNear) {
+            CU_TRY(cudaMemcpy(d_n_off,     quadData->n_offsets,       ((size_t)N+1)*sizeof(int),            cudaMemcpyHostToDevice));
+            CU_TRY(cudaMemcpy(d_n_pts,     quadData->n_pts,           3*(size_t)quadData->n_total*sizeof(double), cudaMemcpyHostToDevice));
+            CU_TRY(cudaMemcpy(d_n_w,       quadData->n_w,             (size_t)quadData->n_total*sizeof(double),   cudaMemcpyHostToDevice));
+            CU_TRY(cudaMemcpy(d_pair_rows, quadData->pair_rows,       (size_t)quadData->n_pairs*sizeof(int), cudaMemcpyHostToDevice));
+            CU_TRY(cudaMemcpy(d_pair_cols, quadData->pair_cols,       (size_t)quadData->n_pairs*sizeof(int), cudaMemcpyHostToDevice));
+        }
         CU_TRY(cudaMemcpy(d_face_offsets, polyData->face_offsets,     ((size_t)N+1)*sizeof(int),            cudaMemcpyHostToDevice));
         CU_TRY(cudaMemcpy(d_edge_offsets, polyData->edge_offsets,     ((size_t)nFaces+1)*sizeof(int),       cudaMemcpyHostToDevice));
         if(nFaces > 0) {
@@ -834,7 +970,7 @@ int radGPU_AssembleMatrix(
             long long gridSize = (pairs + blockSize - 1) / blockSize;
 
             assemble_mixed_kernel<<<(unsigned int)gridSize, blockSize>>>(
-                N, d_obs, d_centers,
+                N, d_q_off, d_q_pts, d_q_w,
                 d_face_offsets, d_edge_offsets,
                 d_face_cz, d_face_rot, d_face_orig, d_edge_pts,
                 d_is_rec, d_rec_centers, d_rec_dims,
@@ -847,12 +983,34 @@ int radGPU_AssembleMatrix(
             CU_TRY(cudaGetLastError());        // launch-configuration errors (grid/block, args)
             CU_TRY(cudaDeviceSynchronize());   // in-kernel errors (illegal access, TDR timeout, ...)
 
+            // Galerkin near pass: overwrite the near-pair entries of this tile
+            // with their higher-order values. Threads outside the tile's row
+            // range return immediately, so the same list serves every tile.
+            if(haveNear) {
+                long long nGrid = ((long long)quadData->n_pairs + blockSize - 1) / blockSize;
+                assemble_near_kernel<<<(unsigned int)nGrid, blockSize>>>(
+                    N, d_pair_rows, d_pair_cols, quadData->n_pairs,
+                    d_n_off, d_n_pts, d_n_w,
+                    d_face_offsets, d_edge_offsets,
+                    d_face_cz, d_face_rot, d_face_orig, d_edge_pts,
+                    d_is_rec, d_rec_centers, d_rec_dims,
+                    recData->abs_rand, recData->rel_rand, recData->zero_rand,
+                    recData->act_on_doubles,
+                    d_sym_counts, d_sym_offsets, d_sym_pt, d_sym_ft,
+                    row0, nRows,
+                    d_out);
+                CU_TRY(cudaGetLastError());
+                CU_TRY(cudaDeviceSynchronize());
+            }
+
             CU_TRY(cudaMemcpy(result->matrix_blocks + (long long)row0 * N * 9, d_out,
                               pairs*9*sizeof(float), cudaMemcpyDeviceToHost));
         }
 
     cleanup:
-        cudaFree(d_obs); cudaFree(d_centers);
+        cudaFree(d_q_off); cudaFree(d_q_pts); cudaFree(d_q_w);
+        cudaFree(d_n_off); cudaFree(d_n_pts); cudaFree(d_n_w);
+        cudaFree(d_pair_rows); cudaFree(d_pair_cols);
         cudaFree(d_face_offsets); cudaFree(d_edge_offsets);
         cudaFree(d_face_cz); cudaFree(d_face_rot); cudaFree(d_face_orig);
         cudaFree(d_edge_pts); cudaFree(d_sym_pt); cudaFree(d_sym_ft);
