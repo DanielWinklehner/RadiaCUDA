@@ -34,9 +34,9 @@ void radTPolyhedron::FillInVectHandlePgnAndTrans(TVector3d* ArrayOfPoints, int l
 	TVector3d* ArrayOfFacesNormals = new TVector3d[AmOfFaces];
 	if(ArrayOfFacesNormals == 0) { SomethingIsWrong=1; Send.ErrorMessage("Radia::Error900"); return;}
 
-	if(!CheckIfFacePolygonsArePlanar(ArrayOfPoints, ArrayOfFaces, ArrayOfLengths, ArrayOfFacesNormals)) return;
-	if(!DetermineActualFacesNormals(ArrayOfPoints, lenArrayOfPoints, ArrayOfFaces, ArrayOfLengths, ArrayOfFacesNormals)) return;
-	if(!FillInTransAndFacesInLocFrames(ArrayOfPoints, ArrayOfFaces, ArrayOfLengths, ArrayOfFacesNormals)) return;
+	if(!CheckIfFacePolygonsArePlanar(ArrayOfPoints, ArrayOfFaces, ArrayOfLengths, ArrayOfFacesNormals)) { delete[] ArrayOfFacesNormals; return;}
+	if(!DetermineActualFacesNormals(ArrayOfPoints, lenArrayOfPoints, ArrayOfFaces, ArrayOfLengths, ArrayOfFacesNormals)) { delete[] ArrayOfFacesNormals; return;}
+	if(!FillInTransAndFacesInLocFrames(ArrayOfPoints, ArrayOfFaces, ArrayOfLengths, ArrayOfFacesNormals)) { delete[] ArrayOfFacesNormals; return;}
 
 	delete[] ArrayOfFacesNormals;
 }
@@ -233,20 +233,21 @@ int radTPolyhedron::DetermineActualFacesNormals(TVector3d* ArrayOfPoints, int Am
 // Determining all the rest normals
 	short** SegmentPassed = new short*[AmOfFaces];
 	if(SegmentPassed == 0) { SomethingIsWrong=1; Send.ErrorMessage("Radia::Error900"); return 0;}
+	for(i=0; i<AmOfFaces; i++) SegmentPassed[i] = 0; //so that DeleteAuxInputArrays stays safe if a row allocation below fails
 	for(i=0; i<AmOfFaces; i++)
 	{
 		int CurrentLength = ArrayOfLengths[i];
 		SegmentPassed[i] = new short[CurrentLength];
 		short* LocSegmentPassed = SegmentPassed[i];
-		if(LocSegmentPassed == 0) { SomethingIsWrong=1; Send.ErrorMessage("Radia::Error900"); return 0;}
+		if(LocSegmentPassed == 0) { SomethingIsWrong=1; Send.ErrorMessage("Radia::Error900"); DeleteAuxInputArrays(SegmentPassed); return 0;}
 		for(int k=0; k<CurrentLength; k++) LocSegmentPassed[k] = 0;
 	}
 	int ii = NoOfFirstGoodFace;
 
 	char* GenFacesPassed = new char[AmOfFaces];
-	if(GenFacesPassed == 0) { SomethingIsWrong=1; Send.ErrorMessage("Radia::Error900"); return 0;}
+	if(GenFacesPassed == 0) { SomethingIsWrong=1; Send.ErrorMessage("Radia::Error900"); DeleteAuxInputArrays(SegmentPassed); return 0;}
 	char* PossibleNextFaces = new char[AmOfFaces];
-	if(PossibleNextFaces == 0) { SomethingIsWrong=1; Send.ErrorMessage("Radia::Error900"); return 0;}
+	if(PossibleNextFaces == 0) { SomethingIsWrong=1; Send.ErrorMessage("Radia::Error900"); DeleteAuxInputArrays(SegmentPassed); delete[] GenFacesPassed; return 0;}
 	for(int p=0; p<AmOfFaces; p++) GenFacesPassed[p] = 0;
 
 	for(i=0; i<AmOfFaces; i++)
@@ -308,9 +309,9 @@ int radTPolyhedron::DetermineActualFacesNormals(TVector3d* ArrayOfPoints, int Am
 							TVector3d SegmVect = ArrayOfPoints[NoOfSegmFiPo] - ArrayOfPoints[NoOfSegmStPo];
 							if(!CheckIfJunctionIsConvex(FirstNormal, SegmVect, ArrayOfFacesNormals[iii])) 
 							{// Modify this if non-convex volumes are supported or treated specially
-								SomethingIsWrong = 1; 
-								Send.ErrorMessage("Radia::Error106"); 
-								DeleteAuxInputArrays(SegmentPassed); return 0;
+								SomethingIsWrong = 1;
+								Send.ErrorMessage("Radia::Error106");
+								DeleteAuxInputArrays(SegmentPassed); delete[] GenFacesPassed; delete[] PossibleNextFaces; return 0;
 							}
 							ThisSegmentAlreadyPassed = 1; break;
 						}
