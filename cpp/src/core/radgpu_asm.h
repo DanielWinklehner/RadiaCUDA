@@ -181,5 +181,11 @@ void radGPU_FreeObsQuadData(RadGPU_ObsQuadData* quadData);
 
 void radGPU_FreeSymData(RadGPU_SymData* symData);
 
+// Hand the just-assembled device matrix to the solver's resident cache under
+// this interaction's stamp (no-op if the assembly did not leave one, e.g. it
+// ran on the CPU or was tiled). Discard releases it instead.
+void radGPU_PublishAssembledMatrix(unsigned long long stamp);
+void radGPU_DiscardAssembledMatrix();
+
 #endif // RADIA_WITH_CUDA
 #endif // __RADGPU_ASM_H

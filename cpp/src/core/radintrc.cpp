@@ -168,6 +168,13 @@ int radTInteraction::Setup(const radThg& In_hg, const radThg& In_hgMoreExtSrc, c
 	{//Stamp this interaction matrix for the GPU-resident matrix cache.
 		static unsigned long long sGpuMatrixStampCounter = 0;
 		mGpuMatrixStamp = ++sGpuMatrixStampCounter;
+
+		//If the GPU assembled this matrix and it fits on the device, hand it to
+		//the solver's cache under that stamp instead of letting the first solve
+		//flatten it again (O(N^2) host) and upload it. The assembly already
+		//emits the solver's layout, so nothing has to be converted. No-op when
+		//the assembly ran on the CPU or was tiled.
+		radGPU_PublishAssembledMatrix(mGpuMatrixStamp);
 	}
 #endif
 

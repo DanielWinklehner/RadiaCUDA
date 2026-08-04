@@ -90,6 +90,13 @@ int radGPU_PackInteractionData(
 // True when the device-side matrix cache holds this (stamp, matrixDim).
 int radGPU_MatrixCached(unsigned long long stamp, int matrixDim);
 
+// Hand a device matrix produced by the GPU assembly straight to the solver's
+// resident cache, taking ownership of it. The assembly already emits the
+// solver's layout, so the first solve then skips BOTH the O(N^2) host flatten
+// and the H2D upload. Any previously cached matrix is released.
+void radGPU_AdoptMatrixCache(float* d_matrix, unsigned long long stamp,
+                             int matrixDim);
+
 void radGPU_UnpackMagnetization(
     RadGPURelaxData* gpuData,
     class radTInteraction* intrct);

@@ -25,6 +25,31 @@
 // which does not survive nvcc.
 extern "C" int RadGetGpuFallbackMode();
 
+// Declared here rather than including radgpurlx.h (which drags in the core
+// header chain); defined in radgpurlx.cu.
+void radGPU_AdoptMatrixCache(float* d_matrix, unsigned long long stamp, int matrixDim);
+
+// The assembly now emits the SOLVER's layout, so when the whole matrix fits
+// on the device there is no reason to move it to the host and back. It is
+// staged here and handed to the solver's resident cache once the interaction
+// has been stamped (the stamp is issued after SetupInteractMatrix returns,
+// so the assembly cannot publish under it directly).
+static float* g_pendingAsmMatrix = nullptr;
+static int    g_pendingAsmDim = 0;
+
+void radGPU_PublishAssembledMatrix(unsigned long long stamp)
+{
+    if(!g_pendingAsmMatrix) return;
+    radGPU_AdoptMatrixCache(g_pendingAsmMatrix, stamp, g_pendingAsmDim);
+    g_pendingAsmMatrix = nullptr; g_pendingAsmDim = 0;
+}
+
+void radGPU_DiscardAssembledMatrix()
+{
+    if(g_pendingAsmMatrix) cudaFree(g_pendingAsmMatrix);
+    g_pendingAsmMatrix = nullptr; g_pendingAsmDim = 0;
+}
+
 // ============================================================
 // Finalize one 3x3 block straight into the solver's SCALAR row-major layout.
 //
@@ -1083,6 +1108,17 @@ int radGPU_AssembleMatrix(
                               (size_t)nRows*3*N3*sizeof(float), cudaMemcpyDeviceToHost));
         }
 
+        // Whole matrix resident and already in the solver's layout: keep it
+        // and hand it over instead of round-tripping through the host. When
+        // the matrix was assembled in tiles (streaming) only one tile is on
+        // the device, so there is nothing to hand over.
+        if(!streamRows) {
+            radGPU_DiscardAssembledMatrix();   // drop any earlier unpublished one
+            g_pendingAsmMatrix = d_out;
+            g_pendingAsmDim = N3;
+            d_out = nullptr;                   // ownership moved; cleanup must not free
+        }
+
         {   // Non-finite backstop, now applied in the kernel. Report once,
             // with the offending element pair, so a degenerate (sliver)
             // element stays attributable instead of surfacing much later as
@@ -1111,6 +1147,7 @@ int radGPU_AssembleMatrix(
         cudaFree(d_out);
         cudaFree(d_row_trans); cudaFree(d_bad_count); cudaFree(d_bad_first);
         cudaFree(d_sym_counts); cudaFree(d_sym_offsets);
+        if(rc != 0) radGPU_DiscardAssembledMatrix();
         if(rc != 0 && result->matrix_blocks) {
             delete[] result->matrix_blocks;
             result->matrix_blocks = nullptr;

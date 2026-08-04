@@ -735,6 +735,16 @@ int radGPU_MatrixCached(unsigned long long stamp, int matrixDim)
             g_matCacheStamp == stamp && g_matCacheDim == matrixDim) ? 1 : 0;
 }
 
+void radGPU_AdoptMatrixCache(float* d_matrix, unsigned long long stamp,
+                             int matrixDim)
+{
+    if(!d_matrix || (stamp == 0) || (matrixDim <= 0)) return;
+    if(g_d_matCache && (g_d_matCache != d_matrix)) cudaFree(g_d_matCache);
+    g_d_matCache = d_matrix;
+    g_matCacheStamp = stamp;
+    g_matCacheDim = matrixDim;
+}
+
 // Anderson-acceleration compile-time defaults (env-overridable for A/B runs:
 // RADIA_NO_ANDERSON=1 disables; RADIA_ANDERSON_M / RADIA_ANDERSON_BETA tune).
 #define RADGPU_ANDERSON_M_MAX 8
